@@ -1,0 +1,19 @@
+# Build outputs
+*.exe
+*.o
+*.obj
+
+# Debug/runtime logs
+*.log
+
+# Claude local (per-user) settings
+.claude/settings.local.json
+
+# Internal planning docs, agent memory and notes (not published)
+docs/
+memory/
+CLAUDE.md
+
+# Editor / OS cruft
+*~
+Thumbs.db
