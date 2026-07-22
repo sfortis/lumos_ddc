@@ -3,7 +3,9 @@ setlocal
 
 :: Lumos build script (MSVC)
 :: Usage: build.bat          (release, no logging)
-::        build.bat debug    (debug, logging to lumos.log)
+::        build.bat debug    (debug, logging to build\lumos.log)
+
+if not exist build mkdir build
 
 set DEFS=/D_UNICODE /DUNICODE
 if /i "%1"=="debug" (
@@ -14,17 +16,17 @@ if /i "%1"=="debug" (
 )
 
 :: Compile resource
-rc /nologo lumos.rc
+rc /nologo /fo build\lumos.res lumos.rc
 if errorlevel 1 (
     echo Resource compilation failed.
     exit /b 1
 )
 
-:: Compile and link
+:: Compile and link (all intermediates and the exe go to build\)
 cl /nologo /O2 /W4 /WX- %DEFS% ^
    lumos.c monitor.c ui.c presets.c schedule.c wmibright.c ^
-   lumos.res ^
-   /Fe:lumos.exe ^
+   build\lumos.res ^
+   /Fo"build\\" /Fe:build\lumos.exe ^
    /link /subsystem:windows ^
    dxva2.lib user32.lib gdi32.lib shell32.lib ^
    comctl32.lib advapi32.lib ole32.lib oleaut32.lib wbemuuid.lib ^
@@ -36,7 +38,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build successful: lumos.exe
-del /q *.obj 2>nul
+echo Build successful: build\lumos.exe
+del /q build\*.obj 2>nul
 
 endlocal

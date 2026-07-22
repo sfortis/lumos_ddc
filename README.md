@@ -82,20 +82,22 @@ During enumeration each monitor is probed for DDC/CI first; if that fails, Lumos
 
 ### Build from source
 
-Cross-compile from Linux/WSL with MinGW:
+Cross-compile from Linux/WSL with MinGW (outputs land in `build/`):
 
 ```bash
+mkdir -p build
+x86_64-w64-mingw32-windres lumos.rc -O coff -o build/lumos.res
 x86_64-w64-mingw32-gcc -O2 -Wall -mwindows -DUNICODE -D_UNICODE \
-  lumos.c monitor.c ui.c presets.c schedule.c wmibright.c lumos.res \
-  -o lumos.exe \
+  lumos.c monitor.c ui.c presets.c schedule.c wmibright.c build/lumos.res \
+  -o build/lumos.exe \
   -ldxva2 -luser32 -lgdi32 -lshell32 -lcomctl32 -ladvapi32 -lole32 -loleaut32 -lwbemuuid -ldwmapi -lwtsapi32 -lkernel32 -lm
 ```
 
-Or with MSVC from a Developer Command Prompt:
+Or with MSVC from a Developer Command Prompt (also writes to `build/`):
 
 ```bat
 build.bat            :: release
-build.bat debug      :: debug build with logging to lumos.log
+build.bat debug      :: debug build with logging to build\lumos.log
 ```
 
 ## Usage
