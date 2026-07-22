@@ -18,6 +18,7 @@
 
 - [What it does](#what-it-does)
 - [Why Lumos?](#why-lumos)
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Install](#install)
@@ -48,6 +49,17 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 | Time-of-day brightness schedule | No | Yes |
 | Presets | No | Yes |
 | Footprint | n/a | One ~480 KB exe, no deps |
+
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: per-monitor slider, delta buttons, and All Monitors master" />
+  &nbsp;&nbsp;
+  <img src="screenshots/02-context-menu.png" width="250" alt="Dark context menu: presets, schedule, autostart, About" />
+</p>
+<p align="center">
+  <img src="screenshots/03-osd.png" width="420" alt="On-screen display overlay with percentage and progress bar" />
+</p>
 
 ## Features
 
