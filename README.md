@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/sfortis/lumos_ddc?logo=github)](https://github.com/sfortis/lumos_ddc/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/sfortis/lumos_ddc/total?logo=github)](https://github.com/sfortis/lumos_ddc/releases)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
-![Language](https://img.shields.io/badge/C-Win32-A8B9CC?logo=c&logoColor=white)
+![Language](https://img.shields.io/badge/C-native%20Windows%20API-A8B9CC?logo=c&logoColor=white)
 ![Size](https://img.shields.io/badge/size-~480%20KB-success)
 
 </div>
@@ -32,7 +32,7 @@
 
 Lumos is a tiny Windows system-tray utility that adjusts the hardware brightness of your monitors. It talks **DDC/CI** to external displays and uses the **WMI backlight** interface for internal laptop panels, so a single slider (or hotkey) dims everything at once: desktop monitors, a laptop screen, or a mixed setup.
 
-Pure Win32 and GDI, no runtime, no installer, no background bloat. One small `.exe`.
+Pure native Windows API and GDI, no runtime, no installer, no background bloat. One small 64-bit `.exe`.
 
 ## Why Lumos?
 
@@ -71,7 +71,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 - **Brightness schedule** - Optional time-of-day schedule that smoothly ramps brightness across the day (piecewise-linear, wraps around midnight). A manual change suspends it until the next anchor.
 - **Presets** - Night, Day, and Presentation, editable in the config file.
 - **On-screen display** - A clean overlay with the current percentage and a progress bar.
-- **Auto-reconnect** - Re-detects monitors on plug/unplug, session unlock, and display power-on (recovers stale DDC handles after a lock screen).
+- **Auto-reconnect and restore** - Re-detects monitors on plug/unplug, session unlock, display power-on, and wake from sleep. Beyond recovering stale DDC handles, it re-applies your brightness (the schedule value, or the last master level) because displays often reset to full brightness across sleep or standby.
 - **Autostart** - Optional launch at login.
 - **Single instance with handoff** - Launching a newer build seamlessly takes over from the running one.
 

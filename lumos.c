@@ -42,6 +42,7 @@ static HPOWERNOTIFY g_hPowerNotify;   /* GUID_CONSOLE_DISPLAY_STATE registration
 static UINT         g_wmTakeover;     /* cross-process "quit, I'm replacing you" message */
 static volatile LONG g_rescanBusy;    /* 1 while a rescan worker thread is in flight */
 static BOOL         g_rescanPending;  /* a trigger arrived mid-rescan; run once more (main thread only) */
+static BOOL         g_reapplyOnRescan; /* set by wake/unlock/display-on: re-push brightness after the rescan */
 static BOOL         g_scheduleSuspended = FALSE;
 static int          g_scheduleSuspendMinute = 0;   /* minute-of-day at suspend */
 static int          g_scheduleResumeMinute = 0;    /* next anchor to resume at */
@@ -464,6 +465,25 @@ static void Schedule_ApplyNow(void)
     UI_RefreshPopup(g_hwndPopup, &g_monitors);  /* no-op if popup hidden */
 }
 
+/* Re-push the intended brightness onto the (freshly re-enumerated) monitors.
+   Called after a wake/unlock/display-on rescan, because many displays reset
+   their brightness to a default (often 100%) across sleep or DPMS off, and a
+   plain re-enumeration only reads that reset value back, it does not restore
+   ours. When a schedule is active we force its current value (bypassing the
+   "unchanged" guard); otherwise we re-apply the last master target. */
+static void ReapplyBrightness(void)
+{
+    if (g_settings.scheduleEnabled && g_settings.scheduleCount > 0 && !g_scheduleSuspended) {
+        g_scheduleLastApplied = -1;   /* force a re-push even if the value is unchanged */
+        Schedule_ApplyNow();
+        return;
+    }
+    if (g_masterTarget >= 0) {         /* skip if the user never set a level yet */
+        Monitor_SetAllBrightness(&g_monitors, g_masterTarget);
+        UI_RefreshPopup(g_hwndPopup, &g_monitors);
+    }
+}
+
 /* A manual brightness change: hand control back to the user until the next anchor. */
 static void Schedule_Suspend(void)
 {
@@ -552,8 +572,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_WTSSESSION_CHANGE:
         /* Session unlocked or reconnected: DDC handles may be stale */
-        if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT)
+        if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT) {
+            g_reapplyOnRescan = TRUE;   /* restore brightness after the recovery rescan */
             ScheduleRescan(hwnd);
+        }
         return 0;
 
     case WM_POWERBROADCAST:
@@ -563,9 +585,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (pbs &&
                 IsEqualGUID(&pbs->PowerSetting, &kGuidConsoleDisplayState) &&
                 pbs->DataLength >= 1 && pbs->Data[0] != 0) {  /* 0 = off, non-zero = on/dimmed */
+                g_reapplyOnRescan = TRUE;
                 ScheduleRescan(hwnd);
             }
         } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+            g_reapplyOnRescan = TRUE;   /* wake from sleep: displays often reset brightness */
             ScheduleRescan(hwnd);
         }
         return TRUE;
@@ -590,6 +614,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Settings_LoadDeltas(&g_settings, &g_monitors);
             if (g_hwndPopup) DestroyWindow(g_hwndPopup);
             g_hwndPopup = UI_CreatePopup(g_hInst, &g_monitors);
+            if (g_reapplyOnRescan) {
+                g_reapplyOnRescan = FALSE;
+                ReapplyBrightness();   /* restore our level after wake/unlock/display-on */
+            }
         }
         g_rescanBusy = 0;
         if (g_rescanPending) {   /* triggers arrived mid-run: coalesce one more */
