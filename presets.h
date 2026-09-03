@@ -25,6 +25,9 @@ typedef struct {
     SchedulePoint schedule[MAX_SCHEDULE];
     int           scheduleCount;
     BOOL          scheduleEnabled;
+    BOOL          idleDimEnabled;
+    int           idleDimPercent;   /* level held while the session is idle (0-100) */
+    int           idleDimMinutes;   /* idle time before dimming */
 } Settings;
 
 /* Initialize settings path and load from INI */

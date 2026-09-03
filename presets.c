@@ -40,6 +40,9 @@ void Settings_CreateDefaults(Settings *s)
     WritePrivateProfileStringW(L"Presets", L"Presentation", L"100", s->iniPath);
     WritePrivateProfileStringW(L"Settings", L"Step", L"5", s->iniPath);
     WritePrivateProfileStringW(L"Settings", L"Autostart", L"0", s->iniPath);
+    WritePrivateProfileStringW(L"Settings", L"IdleDimEnabled", L"0", s->iniPath);
+    WritePrivateProfileStringW(L"Settings", L"IdleDimPercent", L"5", s->iniPath);
+    WritePrivateProfileStringW(L"Settings", L"IdleDimMinutes", L"5", s->iniPath);
 }
 
 void Settings_Load(Settings *s)
@@ -71,6 +74,17 @@ void Settings_Load(Settings *s)
     if (s->step > 50) s->step = 50;
 
     s->autostart = (BOOL)GetPrivateProfileIntW(L"Settings", L"Autostart", 0, s->iniPath);
+
+    /* Idle auto-dim */
+    s->idleDimEnabled = (BOOL)GetPrivateProfileIntW(L"Settings", L"IdleDimEnabled", 0, s->iniPath);
+    s->idleDimPercent = (int)GetPrivateProfileIntW(L"Settings", L"IdleDimPercent", 5, s->iniPath);
+    if (s->idleDimPercent < 0)   s->idleDimPercent = 0;
+    if (s->idleDimPercent > 100) s->idleDimPercent = 100;
+    s->idleDimMinutes = (int)GetPrivateProfileIntW(L"Settings", L"IdleDimMinutes", 5, s->iniPath);
+    /* One minute floor so the dim cannot fire while the user is still reading,
+       one day ceiling because anything longer never triggers in practice. */
+    if (s->idleDimMinutes < 1)    s->idleDimMinutes = 1;
+    if (s->idleDimMinutes > 1440) s->idleDimMinutes = 1440;
 
     /* Load deltas */
     s->deltaCount = 0;
@@ -136,6 +150,13 @@ void Settings_Save(Settings *s)
 
     wsprintfW(val, L"%d", s->autostart ? 1 : 0);
     WritePrivateProfileStringW(L"Settings", L"Autostart", val, s->iniPath);
+
+    WritePrivateProfileStringW(L"Settings", L"IdleDimEnabled",
+                               s->idleDimEnabled ? L"1" : L"0", s->iniPath);
+    wsprintfW(val, L"%d", s->idleDimPercent);
+    WritePrivateProfileStringW(L"Settings", L"IdleDimPercent", val, s->iniPath);
+    wsprintfW(val, L"%d", s->idleDimMinutes);
+    WritePrivateProfileStringW(L"Settings", L"IdleDimMinutes", val, s->iniPath);
 
     /* Save deltas */
     WritePrivateProfileSectionW(L"Deltas", L"", s->iniPath);

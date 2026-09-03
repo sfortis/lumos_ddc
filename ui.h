@@ -79,6 +79,18 @@ void UI_ShowContextMenu(HWND hwndOwner, Settings *s);
    posts WM_COMMAND(IDM_SCHEDULE_SAVED) to hwndOwner. */
 void UI_ShowScheduleEditor(HWND hwndOwner, Settings *s);
 
+/* Settings window dimensions */
+#define SET_WIDTH       320
+#define SET_HEADER_H    40
+#define SET_SECTION_H   26
+#define SET_ROW_H       32
+#define SET_FOOTER_H    48
+#define SET_CORNER      12
+
+/* Show the settings window. On Save it writes the edited values into *s and
+   posts WM_COMMAND(IDM_SETTINGS_SAVED) to hwndOwner. */
+void UI_ShowSettings(HWND hwndOwner, Settings *s);
+
 /* About window dimensions */
 #define ABOUT_WIDTH     300
 #define ABOUT_HEIGHT    182

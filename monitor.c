@@ -8,17 +8,26 @@
 
 #ifdef DEBUG
 
+#include <shlobj.h>
+
 static FILE *g_logFile = NULL;
 
+/* The log goes to %APPDATA%\Lumos, next to config.ini, and not next to the
+   exe: the app normally lives under Program Files, where a non-elevated
+   process cannot create files, and a 64-bit process gets no VirtualStore
+   redirection either, so an exe-relative log silently never appears. */
 static void LogOpen(void)
 {
     if (g_logFile) return;
-    WCHAR exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    WCHAR *dot = wcsrchr(exePath, L'.');
-    if (dot) wcscpy(dot, L".log");
-    else wcscat(exePath, L".log");
-    g_logFile = _wfopen(exePath, L"a");
+    WCHAR path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path))) {
+        wcscat(path, L"\\Lumos");
+        CreateDirectoryW(path, NULL);
+        wcscat(path, L"\\lumos-ddc.log");
+    } else {
+        wcscpy(path, L".\\lumos-ddc.log");
+    }
+    g_logFile = _wfopen(path, L"a");
 }
 
 static void Log(const char *fmt, ...)
@@ -296,17 +305,11 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR hMon, HDC hdcMon, LPRECT lpRect, L
             LogW("  Physical monitor", phys[i].szPhysicalMonitorDescription);
             Log("    hPhysical=%p", phys[i].hPhysicalMonitor);
 
-            DWORD caps = 0, colorTemps = 0;
-            BOOL hasBrightness = FALSE;
-            BOOL capsOk = GetMonitorCapabilities(phys[i].hPhysicalMonitor, &caps, &colorTemps);
-
-            if (capsOk) {
-                hasBrightness = (caps & MC_CAPS_BRIGHTNESS) != 0;
-                Log("    Caps OK: caps=0x%lx colorTemps=0x%lx hasBrightness=%d", caps, colorTemps, hasBrightness);
-            } else {
-                Log("    GetMonitorCapabilities FAILED, err=%lu — trying GetMonitorBrightness as fallback", GetLastError());
-            }
-
+            /* GetMonitorCapabilities is deliberately not called. It was only a
+               hint, since GetMonitorBrightness is tried below in every case, it
+               costs close to a second on monitors that answer it with an error,
+               and it is where the enumeration hung for minutes when a
+               DisplayPort link came back after the display had slept. */
             BrightMonitor *bm = &ml->monitors[ml->count];
             bm->hPhysical = phys[i].hPhysicalMonitor;
             bm->hasHandle = TRUE;
@@ -324,7 +327,8 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR hMon, HDC hdcMon, LPRECT lpRect, L
             bm->name[127] = L'\0';
             LogW("    Friendly name", bm->name);
 
-            /* Always try GetMonitorBrightness — some monitors fail caps but still work */
+            /* A monitor that answers a brightness read is controllable, which is
+               the only signal we need. */
             bm->backend = BACKEND_NONE;
             bm->controllable = FALSE;
             bm->wmiInstance[0] = L'\0';
@@ -338,16 +342,7 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR hMon, HDC hdcMon, LPRECT lpRect, L
                 bm->brightnessMin = bMin;
                 bm->brightnessCur = bCur;
                 bm->brightnessMax = bMax;
-                Log("    Brightness: min=%lu cur=%lu max=%lu%s",
-                    bMin, bCur, bMax, hasBrightness ? "" : " (caps failed, but brightness works!)");
-            } else if (hasBrightness) {
-                /* Caps said yes but GetMonitorBrightness failed */
-                bm->backend = BACKEND_DDC;
-                bm->controllable = TRUE;
-                bm->brightnessMin = 0;
-                bm->brightnessCur = 50;
-                bm->brightnessMax = 100;
-                Log("    GetMonitorBrightness FAILED (err=%lu), using defaults", GetLastError());
+                Log("    Brightness: min=%lu cur=%lu max=%lu", bMin, bCur, bMax);
             } else if (TryAttachWmiPanel(ctx, hMon, bm)) {
                 /* Internal laptop panel: no DDC, but WMI backlight works. */
                 Log("    Using WMI backlight backend");
@@ -475,6 +470,14 @@ BOOL Monitor_SetBrightness(BrightMonitor *mon, DWORD percent)
         Log("  -> FAILED, err=%lu", GetLastError());
     }
     return ok;
+}
+
+BOOL Monitor_HasControllable(const MonitorList *ml)
+{
+    for (int i = 0; i < ml->count; i++)
+        if (ml->monitors[i].controllable)
+            return TRUE;
+    return FALSE;
 }
 
 void Monitor_SetAllBrightness(MonitorList *ml, int percent)

@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <wtsapi32.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include "monitor.h"
 #include "ui.h"
 #include "presets.h"
+#include "capture.h"
 
 /* GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
    Defined manually because some MinGW headers omit it. Fires on display
@@ -31,6 +33,32 @@ static const GUID kGuidConsoleDisplayState =
 #define SCHEDULE_TIMER_ID   0xB101
 #define SCHEDULE_TICK_MS    60000
 
+/* A rescan worker can hang for minutes inside a dxva2 call while a display is
+   coming back from sleep. The watchdog writes such a worker off so the
+   single-flight guard cannot jam the app out of ever rescanning again. */
+#define RESCAN_WATCHDOG_TIMER_ID  0xB103
+#define RESCAN_WATCHDOG_MS        10000
+
+/* Windows reports either no monitor or a generic placeholder panel for the
+   first few seconds after a DisplayPort link returns. Rather than adopt that,
+   we keep the list we have and rescan on this backoff. */
+#define RESCAN_RETRY_TIMER_ID     0xB104
+static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
+#define RESCAN_MAX_RETRIES ((int)(sizeof(kRescanBackoffMs) / sizeof(kRescanBackoffMs[0])))
+
+/* A written-off worker stays parked in the driver call forever, so retrying
+   without a bound would leak one thread every watchdog period for as long as
+   the display stays broken. After this many in a row we stop on our own and
+   wait for the next real trigger: a display change, an unlock, or the manual
+   Re-scan Monitors. */
+#define RESCAN_MAX_WRITEOFFS 3
+
+/* Idle auto-dim poll. GetLastInputInfo costs nothing and we only touch the
+   monitors on a state transition, so the interval is set by how fast the
+   brightness must come back once the user returns, not by polling cost. */
+#define IDLE_TIMER_ID       0xB102
+#define IDLE_TICK_MS        2000
+
 static HINSTANCE    g_hInst;
 static HWND         g_hwndHidden;    /* Hidden top-level window (receives broadcasts + notifications) */
 static HWND         g_hwndPopup;
@@ -47,6 +75,13 @@ static BOOL         g_scheduleSuspended = FALSE;
 static int          g_scheduleSuspendMinute = 0;   /* minute-of-day at suspend */
 static int          g_scheduleResumeMinute = 0;    /* next anchor to resume at */
 static int          g_scheduleLastApplied = -1;    /* last brightness pushed by the schedule */
+static int          g_masterTarget = -1;      /* intended base percent, tracked across hotkey presses */
+static BOOL         g_idleDimmed = FALSE;     /* TRUE while the idle level is on the monitors */
+static DWORD        g_rescanStartTick = 0;    /* when the current worker was launched */
+static DWORD        g_rescanGeneration = 0;   /* incremented per launch */
+static DWORD        g_rescanAwaitedGen = 0;   /* the only generation whose result we accept */
+static int          g_rescanRetry = 0;        /* index into kRescanBackoffMs */
+static int          g_rescanWriteOffs = 0;    /* consecutive workers the watchdog gave up on */
 
 static const WCHAR APPCLASS[] = L"LumosMain";
 
@@ -64,8 +99,16 @@ static void RemoveMouseHook(void);
 static void ScheduleRescan(HWND hwnd);
 static void StartRescan(HWND hwnd);
 static DWORD WINAPI RescanThreadProc(LPVOID param);
+
+/* Heap-passed to the rescan worker: which window to post back to, and which
+   generation the result belongs to. */
+typedef struct { HWND hwnd; DWORD gen; } RescanArgs;
 static void Schedule_ApplyNow(void);
 static void Schedule_Suspend(void);
+static void ManualChange(void);
+static int  MasterTargetFromMonitors(void);
+static void Idle_Tick(void);
+static void Idle_Restore(void);
 
 static void SaveDeltasCallback(void)
 {
@@ -151,9 +194,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
 
     /* Brightness schedule: suspend on manual slider changes, tick every minute,
        and apply the current time slot immediately at startup. */
-    UI_SetManualChangeCallback(Schedule_Suspend);
+    UI_SetManualChangeCallback(ManualChange);
     SetTimer(g_hwndHidden, SCHEDULE_TIMER_ID, SCHEDULE_TICK_MS, NULL);
     Schedule_ApplyNow();
+
+    /* Idle auto-dim tick. Always armed: the handler returns at once when the
+       feature is off, which keeps enable/disable free of timer bookkeeping. */
+    SetTimer(g_hwndHidden, IDLE_TIMER_ID, IDLE_TICK_MS, NULL);
 
     /* Message loop */
     MSG msg;
@@ -208,11 +255,15 @@ static FILE *g_dbgLog = NULL;
 static void DbgLog(const char *fmt, ...)
 {
     if (!g_dbgLog) {
+        /* Same folder as config.ini, for the reason explained in monitor.c. */
         WCHAR path[MAX_PATH];
-        GetModuleFileNameW(NULL, path, MAX_PATH);
-        WCHAR *dot = wcsrchr(path, L'.');
-        if (dot) wcscpy(dot, L"_hook.log");
-        else wcscat(path, L"_hook.log");
+        if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, path))) {
+            wcscat(path, L"\\Lumos");
+            CreateDirectoryW(path, NULL);
+            wcscat(path, L"\\lumos-app.log");
+        } else {
+            wcscpy(path, L".\\lumos-app.log");
+        }
         g_dbgLog = _wfopen(path, L"a");
     }
     if (!g_dbgLog) return;
@@ -229,6 +280,20 @@ static void DbgLog(const char *fmt, ...)
 }
 #else
 #define DbgLog(...) ((void)0)
+#endif
+
+/* Times a UI-thread operation into the debug log. Several operations here
+   talk to the display over DDC/CI, which can block for seconds when the
+   display is asleep or the handle is stale, and a blocked UI thread is
+   indistinguishable from a hung app. Compiled out of the release build. */
+#ifdef DEBUG
+#define TIMED(label, ...) do {                                  \
+        DWORD t0_ = GetTickCount();                             \
+        __VA_ARGS__;                                            \
+        DbgLog("%s: %lu ms", label, GetTickCount() - t0_);      \
+    } while (0)
+#else
+#define TIMED(label, ...) do { __VA_ARGS__; } while (0)
 #endif
 
 static BOOL IsCursorOverTrayIcon(POINT ptPhysical)
@@ -306,7 +371,21 @@ static void ShowContextMenu(HWND hwnd)
 
 /* ---- Hotkey Handler ---- */
 
-static int g_masterTarget = -1;  /* tracks intended base percent across hotkey presses */
+/* Recover the intended base percent from what the monitors currently report:
+   average the readings, subtracting each monitor's delta to get the base. */
+static int MasterTargetFromMonitors(void)
+{
+    int sum = 0, cnt = 0;
+    for (int i = 0; i < g_monitors.count; i++) {
+        BrightMonitor *mon = &g_monitors.monitors[i];
+        if (!mon->controllable) continue;
+        DWORD range = mon->brightnessMax - mon->brightnessMin;
+        int pct = range > 0 ? (int)(((mon->brightnessCur - mon->brightnessMin) * 100) / range) : 0;
+        sum += pct - mon->delta;
+        cnt++;
+    }
+    return cnt > 0 ? sum / cnt : 50;
+}
 
 static void HandleHotkey(int id)
 {
@@ -320,19 +399,8 @@ static void HandleHotkey(int id)
     }
 
     /* Initialize target from current state if needed */
-    if (g_masterTarget < 0) {
-        int sum = 0, cnt = 0;
-        for (int i = 0; i < g_monitors.count; i++) {
-            BrightMonitor *mon = &g_monitors.monitors[i];
-            if (!mon->controllable) continue;
-            DWORD range = mon->brightnessMax - mon->brightnessMin;
-            int pct = range > 0 ? (int)(((mon->brightnessCur - mon->brightnessMin) * 100) / range) : 0;
-            /* Subtract delta to recover the base value */
-            sum += pct - mon->delta;
-            cnt++;
-        }
-        g_masterTarget = cnt > 0 ? sum / cnt : 50;
-    }
+    if (g_masterTarget < 0)
+        g_masterTarget = MasterTargetFromMonitors();
 
     g_masterTarget += delta;
 
@@ -350,10 +418,11 @@ static void HandleHotkey(int id)
     if (g_masterTarget < lo) g_masterTarget = lo;
     if (g_masterTarget > hi) g_masterTarget = hi;
 
-    Monitor_SetAllBrightness(&g_monitors, g_masterTarget);
+    TIMED("hotkey: SetAllBrightness",
+          Monitor_SetAllBrightness(&g_monitors, g_masterTarget));
 
     /* Show OSD on primary monitor (where cursor is) */
-    Monitor_RefreshBrightness(&g_monitors);
+    TIMED("hotkey: RefreshBrightness", Monitor_RefreshBrightness(&g_monitors));
     {
         POINT curPos;
         GetCursorPos(&curPos);
@@ -374,7 +443,7 @@ static void HandleHotkey(int id)
     /* Update popup if visible */
     UI_RefreshPopup(g_hwndPopup, &g_monitors);
 
-    Schedule_Suspend();  /* manual change: yield schedule control until next anchor */
+    ManualChange();
 }
 
 /* ---- Apply Preset ---- */
@@ -387,7 +456,7 @@ static void ApplyPreset(int index)
     Monitor_RefreshBrightness(&g_monitors);
     UI_RefreshPopup(g_hwndPopup, &g_monitors);
 
-    Schedule_Suspend();  /* manual change: yield schedule control until next anchor */
+    ManualChange();
 }
 
 /* ---- Monitor rescan (async) ---- */
@@ -400,12 +469,18 @@ static void ApplyPreset(int index)
    window work stays on the main thread. */
 static DWORD WINAPI RescanThreadProc(LPVOID param)
 {
-    HWND hwnd = (HWND)param;
+    RescanArgs *args = (RescanArgs *)param;
+    HWND hwnd = args->hwnd;
+    DWORD gen = args->gen;
+    free(args);
+
     MonitorList *fresh = (MonitorList *)calloc(1, sizeof(MonitorList));
     if (fresh)
         Monitor_Enumerate(fresh);
-    /* Post even on alloc failure (fresh == NULL) so the busy flag is cleared. */
-    PostMessageW(hwnd, WM_APP_RESCAN_DONE, 0, (LPARAM)fresh);
+    /* Post even on alloc failure (fresh == NULL) so the busy flag is cleared.
+       The generation lets the main thread recognise a result from a worker it
+       already wrote off, which may arrive minutes late or never. */
+    PostMessageW(hwnd, WM_APP_RESCAN_DONE, (WPARAM)gen, (LPARAM)fresh);
     return 0;
 }
 
@@ -418,9 +493,26 @@ static void StartRescan(HWND hwnd)
         g_rescanPending = TRUE;
         return;
     }
-    HANDLE h = CreateThread(NULL, 0, RescanThreadProc, hwnd, 0, NULL);
-    if (h) CloseHandle(h);
-    else   g_rescanBusy = 0;   /* launch failed; keep the current list */
+    RescanArgs *args = (RescanArgs *)malloc(sizeof(RescanArgs));
+    if (!args) {
+        g_rescanBusy = 0;
+        return;
+    }
+    args->hwnd = hwnd;
+    args->gen = ++g_rescanGeneration;
+    g_rescanAwaitedGen = args->gen;
+    g_rescanStartTick = GetTickCount();
+
+    HANDLE h = CreateThread(NULL, 0, RescanThreadProc, args, 0, NULL);
+    if (h) {
+        CloseHandle(h);
+        DbgLog("rescan: worker %lu launched", args->gen);
+        SetTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID, RESCAN_WATCHDOG_MS, NULL);
+    } else {
+        free(args);
+        g_rescanAwaitedGen = 0;
+        g_rescanBusy = 0;   /* launch failed; keep the current list */
+    }
 }
 
 /* Debounced trigger: SetTimer with the same id restarts the interval, so a
@@ -428,6 +520,16 @@ static void StartRescan(HWND hwnd)
 static void ScheduleRescan(HWND hwnd)
 {
     SetTimer(hwnd, RESCAN_TIMER_ID, RESCAN_DEBOUNCE_MS, NULL);
+}
+
+/* A display change, an unlock or a manual re-scan is a fresh start: clear the
+   counters that stopped us retrying on our own. */
+static void ScheduleRescanFromTrigger(HWND hwnd)
+{
+    g_rescanWriteOffs = 0;
+    g_rescanRetry = 0;
+    KillTimer(hwnd, RESCAN_RETRY_TIMER_ID);   /* a pending backoff is now moot */
+    ScheduleRescan(hwnd);
 }
 
 /* ---- Schedule runtime ---- */
@@ -446,6 +548,14 @@ static void Schedule_ApplyNow(void)
     if (!g_settings.scheduleEnabled || g_settings.scheduleCount == 0)
         return;
 
+    /* The idle level owns the monitors right now. Leave it alone and force a
+       re-push once the user is back, since by then the schedule value for the
+       current time may equal the last one we applied. */
+    if (g_idleDimmed) {
+        g_scheduleLastApplied = -1;
+        return;
+    }
+
     int now = CurrentMinuteOfDay();
 
     if (g_scheduleSuspended) {
@@ -461,7 +571,7 @@ static void Schedule_ApplyNow(void)
 
     g_scheduleLastApplied = value;
     g_masterTarget = value;
-    Monitor_SetAllBrightness(&g_monitors, value);
+    TIMED("schedule: SetAllBrightness", Monitor_SetAllBrightness(&g_monitors, value));
     UI_RefreshPopup(g_hwndPopup, &g_monitors);  /* no-op if popup hidden */
 }
 
@@ -473,13 +583,21 @@ static void Schedule_ApplyNow(void)
    "unchanged" guard); otherwise we re-apply the last master target. */
 static void ReapplyBrightness(void)
 {
+    /* Woke up with nobody at the keyboard (display power-on, unlock by another
+       session): hold the idle level instead of restoring the full one. */
+    if (g_idleDimmed) {
+        TIMED("reapply(idle level): SetAllBrightness",
+              Monitor_SetAllBrightness(&g_monitors, g_settings.idleDimPercent));
+        return;
+    }
     if (g_settings.scheduleEnabled && g_settings.scheduleCount > 0 && !g_scheduleSuspended) {
         g_scheduleLastApplied = -1;   /* force a re-push even if the value is unchanged */
         Schedule_ApplyNow();
         return;
     }
     if (g_masterTarget >= 0) {         /* skip if the user never set a level yet */
-        Monitor_SetAllBrightness(&g_monitors, g_masterTarget);
+        TIMED("reapply(master): SetAllBrightness",
+              Monitor_SetAllBrightness(&g_monitors, g_masterTarget));
         UI_RefreshPopup(g_hwndPopup, &g_monitors);
     }
 }
@@ -495,6 +613,95 @@ static void Schedule_Suspend(void)
     g_scheduleResumeMinute =
         Schedule_NextAnchorMinute(g_settings.schedule, g_settings.scheduleCount, now);
     g_scheduleLastApplied = -1;  /* force re-apply after resume */
+}
+
+/* Every manual brightness change (hotkey, wheel, slider, preset) goes through
+   here: it supersedes the idle level and suspends the schedule. */
+static void ManualChange(void)
+{
+    g_idleDimmed = FALSE;   /* the user just set a level; do not restore over it */
+    Schedule_Suspend();
+}
+
+/* ---- Idle auto-dim ---- */
+
+/* Milliseconds since the last keyboard or mouse input in this session. */
+static DWORD IdleMilliseconds(void)
+{
+    LASTINPUTINFO lii;
+    lii.cbSize = sizeof(lii);
+    lii.dwTime = 0;
+    if (!GetLastInputInfo(&lii))
+        return 0;
+    return GetTickCount() - lii.dwTime;   /* unsigned math, so the 49-day wrap is fine */
+}
+
+/* Reasons to leave the brightness alone even though no input has arrived. */
+enum { DIMBLOCK_NONE = 0, DIMBLOCK_FULLSCREEN, DIMBLOCK_CAPTURE };
+
+/* Fullscreen video, presentation mode and a live call all mean somebody is
+   watching without touching anything. Checked only when we would dim. */
+static int Idle_DimBlocked(void)
+{
+    QUERY_USER_NOTIFICATION_STATE state;
+    if (SUCCEEDED(SHQueryUserNotificationState(&state)) &&
+        (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+         state == QUNS_PRESENTATION_MODE ||
+         state == QUNS_BUSY))
+        return DIMBLOCK_FULLSCREEN;
+
+    if (Capture_InUse())
+        return DIMBLOCK_CAPTURE;
+
+    return DIMBLOCK_NONE;
+}
+
+/* Drop to the configured idle level. g_masterTarget is left untouched so it
+   still holds the level to come back to; if the user has never set one we
+   recover it from the monitors first, otherwise there is nothing to restore. */
+static void Idle_Dim(void)
+{
+    /* This path is retried every tick for as long as the call or the video
+       lasts, so the log records a reason only when the reason changes. */
+    static int lastBlock = DIMBLOCK_NONE;
+    int block = Idle_DimBlocked();
+    if (block != lastBlock) {
+        lastBlock = block;
+        if (block != DIMBLOCK_NONE)
+            DbgLog("Idle dim skipped: %s", block == DIMBLOCK_FULLSCREEN
+                   ? "fullscreen or presentation" : "microphone or camera in use");
+    }
+    if (block != DIMBLOCK_NONE)
+        return;
+    if (g_masterTarget < 0)
+        g_masterTarget = MasterTargetFromMonitors();
+    g_idleDimmed = TRUE;
+    DbgLog("Idle dim -> %d%% (restore target %d)", g_settings.idleDimPercent, g_masterTarget);
+    TIMED("idle dim: SetAllBrightness",
+          Monitor_SetAllBrightness(&g_monitors, g_settings.idleDimPercent));
+    UI_RefreshPopup(g_hwndPopup, &g_monitors);   /* no-op if the popup is hidden */
+}
+
+/* Back to the pre-dim level. Reuses ReapplyBrightness so an active schedule
+   recomputes its value for the current time: an idle stretch can span hours. */
+static void Idle_Restore(void)
+{
+    if (!g_idleDimmed)
+        return;
+    g_idleDimmed = FALSE;   /* cleared first: ReapplyBrightness holds the idle level while set */
+    DbgLog("Idle restore -> target %d", g_masterTarget);
+    TIMED("idle restore: ReapplyBrightness", ReapplyBrightness());
+}
+
+static void Idle_Tick(void)
+{
+    if (!g_settings.idleDimEnabled) {
+        Idle_Restore();   /* setting turned off mid-dim */
+        return;
+    }
+    BOOL idle = IdleMilliseconds() >= (DWORD)g_settings.idleDimMinutes * 60000u;
+    if (idle && !g_idleDimmed)       Idle_Dim();
+    else if (!idle && g_idleDimmed)  Idle_Restore();
 }
 
 /* ---- Main Window Proc ---- */
@@ -530,7 +737,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ApplyPreset(cmd - IDM_PRESET_BASE);
         } else switch (cmd) {
         case IDM_RESCAN:
-            StartRescan(hwnd);
+            ScheduleRescanFromTrigger(hwnd);
             break;
         case IDM_AUTOSTART: {
             BOOL current = Settings_GetAutostart();
@@ -546,6 +753,28 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_scheduleLastApplied = -1;
             Schedule_ApplyNow();
             break;
+        case IDM_IDLEDIM_TOGGLE:
+            g_settings.idleDimEnabled = !g_settings.idleDimEnabled;
+            Settings_Save(&g_settings);
+            if (!g_settings.idleDimEnabled)
+                Idle_Restore();   /* undo an active dim immediately */
+            break;
+        case IDM_SETTINGS:
+            UI_ShowSettings(hwnd, &g_settings);
+            break;
+        case IDM_SETTINGS_SAVED: {
+            /* The window already wrote the edited values into g_settings.
+               Persist them, then apply the ones with a runtime effect. */
+            if (Settings_GetAutostart() != g_settings.autostart)
+                Settings_SetAutostart(g_settings.autostart);
+            Settings_Save(&g_settings);
+            if (!g_settings.idleDimEnabled)
+                Idle_Restore();           /* undo an active dim right away */
+            g_scheduleSuspended = FALSE;  /* a schedule toggle takes effect now */
+            g_scheduleLastApplied = -1;
+            Schedule_ApplyNow();
+            break;
+        }
         case IDM_SCHEDULE_EDIT:
             UI_ShowScheduleEditor(hwnd, &g_settings);
             break;
@@ -567,14 +796,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_DISPLAYCHANGE:
         /* Monitor plugged/unplugged (resolution/topology change) */
-        ScheduleRescan(hwnd);
+        ScheduleRescanFromTrigger(hwnd);
         return 0;
 
     case WM_WTSSESSION_CHANGE:
         /* Session unlocked or reconnected: DDC handles may be stale */
+        DbgLog("session change: %u", (unsigned)wParam);
         if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT) {
             g_reapplyOnRescan = TRUE;   /* restore brightness after the recovery rescan */
-            ScheduleRescan(hwnd);
+            ScheduleRescanFromTrigger(hwnd);
         }
         return 0;
 
@@ -584,13 +814,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             POWERBROADCAST_SETTING *pbs = (POWERBROADCAST_SETTING *)lParam;
             if (pbs &&
                 IsEqualGUID(&pbs->PowerSetting, &kGuidConsoleDisplayState) &&
-                pbs->DataLength >= 1 && pbs->Data[0] != 0) {  /* 0 = off, non-zero = on/dimmed */
-                g_reapplyOnRescan = TRUE;
-                ScheduleRescan(hwnd);
+                pbs->DataLength >= 1) {
+                DbgLog("display power state = %u", (unsigned)pbs->Data[0]);
+                if (pbs->Data[0] != 0) {   /* 0 = off, non-zero = on/dimmed */
+                    g_reapplyOnRescan = TRUE;
+                    ScheduleRescanFromTrigger(hwnd);
+                }
             }
         } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+            DbgLog("power: APM resume");
             g_reapplyOnRescan = TRUE;   /* wake from sleep: displays often reset brightness */
-            ScheduleRescan(hwnd);
+            ScheduleRescanFromTrigger(hwnd);
         }
         return TRUE;
 
@@ -600,23 +834,88 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             StartRescan(hwnd);
         } else if (wParam == SCHEDULE_TIMER_ID) {
             Schedule_ApplyNow();
+        } else if (wParam == IDLE_TIMER_ID) {
+            Idle_Tick();
+        } else if (wParam == RESCAN_WATCHDOG_TIMER_ID) {
+            KillTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID);
+            if (g_rescanBusy) {
+                /* The worker is stuck inside a display driver call. It cannot be
+                   killed safely, so it is left parked and its result will be
+                   discarded; what matters is releasing the single-flight guard
+                   so the app can rescan again. */
+                DbgLog("rescan: worker %lu written off after %lu ms",
+                       g_rescanAwaitedGen, GetTickCount() - g_rescanStartTick);
+                g_rescanAwaitedGen = 0;
+                g_rescanBusy = 0;
+                g_rescanPending = FALSE;
+                if (++g_rescanWriteOffs <= RESCAN_MAX_WRITEOFFS)
+                    ScheduleRescan(hwnd);   /* try once more with a fresh worker */
+                else
+                    DbgLog("rescan: %d workers hung in a row, waiting for a new trigger",
+                           g_rescanWriteOffs);
+            }
+        } else if (wParam == RESCAN_RETRY_TIMER_ID) {
+            KillTimer(hwnd, RESCAN_RETRY_TIMER_ID);
+            StartRescan(hwnd);
         }
         return 0;
 
     case WM_APP_RESCAN_DONE: {
         /* Worker finished enumerating. Swap in the fresh list and rebuild the
            popup here on the UI thread (window ops must not run on the worker). */
+        DWORD gen = (DWORD)wParam;
         MonitorList *fresh = (MonitorList *)lParam;
+
+        if (gen != g_rescanAwaitedGen) {
+            /* A worker the watchdog wrote off has finally returned. Its handles
+               describe a display topology we have already replaced. */
+            DbgLog("rescan: discarding late result from worker %lu", gen);
+            if (fresh) {
+                TIMED("rescan late: Monitor_Cleanup", Monitor_Cleanup(fresh));
+                free(fresh);
+            }
+            return 0;   /* the busy flag belongs to the current worker now */
+        }
+
+        KillTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID);
+        g_rescanAwaitedGen = 0;
+        g_rescanWriteOffs = 0;   /* this worker came back, the driver is answering */
+        DbgLog("rescan: worker %lu finished after %lu ms",
+               gen, GetTickCount() - g_rescanStartTick);
+
+        /* Reject a placeholder enumeration instead of adopting it: for a few
+           seconds after a display returns, Windows reports no monitor at all or
+           a generic panel, and adopting that silently kills brightness control
+           until the next display event. Retry on a backoff and keep the list we
+           have, which is either still valid or about to be replaced anyway. */
+        if (fresh && !Monitor_HasControllable(fresh) &&
+            (Monitor_HasControllable(&g_monitors) || g_reapplyOnRescan) &&
+            g_rescanRetry < RESCAN_MAX_RETRIES) {
+            DWORD delay = kRescanBackoffMs[g_rescanRetry++];
+            DbgLog("rescan: nothing controllable, retry %d in %lu ms",
+                   g_rescanRetry, delay);
+            TIMED("rescan rejected: Monitor_Cleanup", Monitor_Cleanup(fresh));
+            free(fresh);
+            SetTimer(hwnd, RESCAN_RETRY_TIMER_ID, delay, NULL);
+            g_rescanBusy = 0;
+            return 0;
+        }
+        g_rescanRetry = 0;
+
         if (fresh) {
-            Monitor_Cleanup(&g_monitors);   /* release the now-stale handles */
+            /* Releasing stale handles is itself a DDC call and can block. */
+            TIMED("rescan done: Monitor_Cleanup", Monitor_Cleanup(&g_monitors));
             g_monitors = *fresh;            /* adopt fresh list (plain struct copy) */
             free(fresh);
             Settings_LoadDeltas(&g_settings, &g_monitors);
             if (g_hwndPopup) DestroyWindow(g_hwndPopup);
             g_hwndPopup = UI_CreatePopup(g_hInst, &g_monitors);
-            if (g_reapplyOnRescan) {
+            /* g_idleDimmed is included so a monitor plugged in during an idle
+               stretch gets the idle level too, instead of staying bright. */
+            if (g_reapplyOnRescan || g_idleDimmed) {
                 g_reapplyOnRescan = FALSE;
-                ReapplyBrightness();   /* restore our level after wake/unlock/display-on */
+                /* restore our level after wake/unlock/display-on */
+                TIMED("rescan done: ReapplyBrightness", ReapplyBrightness());
             }
         }
         g_rescanBusy = 0;

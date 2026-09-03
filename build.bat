@@ -3,7 +3,7 @@ setlocal
 
 :: Lumos build script (MSVC)
 :: Usage: build.bat          (release, no logging)
-::        build.bat debug    (debug, logging to build\lumos.log)
+::        build.bat debug    (debug, logging to %APPDATA%\Lumos\lumos-*.log)
 
 if not exist build mkdir build
 
@@ -24,7 +24,7 @@ if errorlevel 1 (
 
 :: Compile and link (all intermediates and the exe go to build\)
 cl /nologo /O2 /W4 /WX- %DEFS% ^
-   lumos.c monitor.c ui.c presets.c schedule.c wmibright.c ^
+   lumos.c monitor.c ui.c presets.c schedule.c wmibright.c capture.c ^
    build\lumos.res ^
    /Fo"build\\" /Fe:build\lumos.exe ^
    /link /subsystem:windows ^

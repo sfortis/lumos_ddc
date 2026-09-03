@@ -69,7 +69,9 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 - **Mouse wheel on the tray icon** - Scroll over the tray icon to nudge brightness up or down.
 - **Per-monitor delta** - Offset an individual monitor (-40..+40) so mismatched panels line up under the master slider.
 - **Brightness schedule** - Optional time-of-day schedule that smoothly ramps brightness across the day (piecewise-linear, wraps around midnight). A manual change suspends it until the next anchor.
-- **Presets** - Night, Day, and Presentation, editable in the config file.
+- **Idle auto-dim** - Optional. After a configurable idle period (default 5 minutes) the brightness drops to a configurable low level (default 5%), and it returns to the previous level as soon as you touch the keyboard or the mouse. Fullscreen video, presentation mode and live calls are skipped, so a movie you are watching or a Teams call you are sitting through without touching anything is not dimmed. Calls are detected by the microphone or the camera being in use, not by the name of the application, so any conferencing tool counts.
+- **Presets** - Night, Day, and Presentation, with editable brightness values.
+- **Settings window** - A dark themed screen for the brightness step, the idle dim level and timeout, the schedule and autostart switches, and the preset values. Right-click the tray icon and pick Settings.
 - **On-screen display** - A clean overlay with the current percentage and a progress bar.
 - **Auto-reconnect and restore** - Re-detects monitors on plug/unplug, session unlock, display power-on, and wake from sleep. Beyond recovering stale DDC handles, it re-applies your brightness (the schedule value, or the last master level) because displays often reset to full brightness across sleep or standby.
 - **Autostart** - Optional launch at login.
@@ -100,7 +102,7 @@ Cross-compile from Linux/WSL with MinGW (outputs land in `build/`):
 mkdir -p build
 x86_64-w64-mingw32-windres lumos.rc -O coff -o build/lumos.res
 x86_64-w64-mingw32-gcc -O2 -Wall -mwindows -DUNICODE -D_UNICODE \
-  lumos.c monitor.c ui.c presets.c schedule.c wmibright.c build/lumos.res \
+  lumos.c monitor.c ui.c presets.c schedule.c wmibright.c capture.c build/lumos.res \
   -o build/lumos.exe \
   -ldxva2 -luser32 -lgdi32 -lshell32 -lcomctl32 -ladvapi32 -lole32 -loleaut32 -lwbemuuid -ldwmapi -lwtsapi32 -lkernel32 -lm
 ```
@@ -109,7 +111,7 @@ Or with MSVC from a Developer Command Prompt (also writes to `build/`):
 
 ```bat
 build.bat            :: release
-build.bat debug      :: debug build with logging to build\lumos.log
+build.bat debug      :: debug build, logs to %APPDATA%\Lumos\lumos-*.log
 ```
 
 ## Usage
@@ -117,7 +119,7 @@ build.bat debug      :: debug build with logging to build\lumos.log
 | Action | Result |
 |---|---|
 | **Left-click** tray icon | Open the brightness popup |
-| **Right-click** tray icon | Context menu (presets, re-scan, schedule, autostart, exit) |
+| **Right-click** tray icon | Context menu (presets, re-scan, settings, schedule, idle dim, autostart, exit) |
 | **Mouse wheel** over tray icon | Brightness up / down by one step (default 5%) |
 | `Ctrl+Alt+Up` / `Ctrl+Alt+Down` | Brightness up / down on all monitors |
 | Drag a slider in the popup | Set that monitor; drag the master slider for all at once |
@@ -131,7 +133,7 @@ Settings live in an INI file at:
 %APPDATA%\Lumos\config.ini
 ```
 
-It is created on first run. Presets and the schedule can be edited there (the schedule also has a built-in editor: right-click tray icon > Edit Schedule).
+It is created on first run. Everything in it can also be set from the interface: the Settings window covers the brightness step, the idle dim values, the schedule and autostart switches, and the preset brightness values, while the schedule points have their own editor (right-click tray icon > Edit Schedule). Preset names are the one thing that has to be edited in the file, because the interface has no text input.
 
 ```ini
 [Presets]
@@ -142,6 +144,9 @@ Presentation=100
 [Settings]
 Step=5
 ScheduleEnabled=0
+IdleDimEnabled=0
+IdleDimPercent=5
+IdleDimMinutes=5
 
 [Schedule]
 07:00=60
@@ -149,6 +154,10 @@ ScheduleEnabled=0
 19:00=70
 23:00=25
 ```
+
+In the Settings window a value changes by clicking its `-` and `+` buttons or by scrolling the wheel over the row, a switch flips by clicking it, and nothing is written until you press Save. Clicking outside the window cancels.
+
+The idle auto-dim keys work together. `IdleDimEnabled` turns the feature on and off, and the tray context menu toggles the same key. `IdleDimPercent` is the level held while the session is idle (0 to 100). `IdleDimMinutes` is how long there must be no keyboard or mouse input before the dim happens (1 to 1440 minutes).
 
 ## Requirements
 
@@ -161,6 +170,7 @@ ScheduleEnabled=0
 - A few external monitors report DDC/CI capability but respond poorly; if a slider has no effect, check that DDC/CI is enabled in the monitor's menu.
 - Settings are stored in `%APPDATA%\Lumos\config.ini`.
 - Some KVM switches or docking stations block DDC/CI passthrough.
+- Idle auto-dim is not a substitute for turning the display off. On an LCD, image retention is temporary and burn-in is not really a risk. On an OLED, a lower backlight level slows pixel wear but does not stop it, because the content stays static. Use the Windows power plan to switch the display off for real protection.
 
 ## License
 
