@@ -46,6 +46,13 @@ void Monitor_RefreshBrightness(MonitorList *ml);
 /* Set brightness for a single monitor (0-100 percentage) */
 BOOL Monitor_SetBrightness(BrightMonitor *mon, DWORD percent);
 
+/* Release the handles of *ml that *keep does not also reference, and empty the
+   list. dxva2 hands out the same physical monitor handle for the same display
+   again, so releasing a list wholesale can invalidate a handle another list has
+   just acquired: every write through it then fails with
+   ERROR_GRAPHICS_INVALID_PHYSICAL_MONITOR_HANDLE. */
+void Monitor_CleanupExcept(MonitorList *ml, const MonitorList *keep);
+
 /* TRUE when at least one monitor in the list can actually be set. Tells a real
    enumeration apart from the placeholder Windows reports while a display is
    still coming back after sleep. */

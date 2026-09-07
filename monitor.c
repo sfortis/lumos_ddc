@@ -472,6 +472,33 @@ BOOL Monitor_SetBrightness(BrightMonitor *mon, DWORD percent)
     return ok;
 }
 
+static BOOL HandleReferencedBy(const MonitorList *keep, HANDLE h)
+{
+    if (!keep) return FALSE;
+    for (int i = 0; i < keep->count; i++)
+        if (keep->monitors[i].hasHandle && keep->monitors[i].hPhysical == h)
+            return TRUE;
+    return FALSE;
+}
+
+void Monitor_CleanupExcept(MonitorList *ml, const MonitorList *keep)
+{
+    for (int i = 0; i < ml->count; i++) {
+        BrightMonitor *bm = &ml->monitors[i];
+        if (!bm->hasHandle)
+            continue;
+        if (HandleReferencedBy(keep, bm->hPhysical)) {
+            /* The other list holds the same handle, so it stays alive and will
+               be released when that list is retired. Worst case we leak one
+               handle; destroying it would break brightness control outright. */
+            Log("Cleanup: keeping handle %p, still referenced", bm->hPhysical);
+            continue;
+        }
+        DestroyPhysicalMonitor(bm->hPhysical);
+    }
+    memset(ml, 0, sizeof(*ml));
+}
+
 BOOL Monitor_HasControllable(const MonitorList *ml)
 {
     for (int i = 0; i < ml->count; i++)

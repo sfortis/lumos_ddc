@@ -53,6 +53,13 @@ static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
    Re-scan Monitors. */
 #define RESCAN_MAX_WRITEOFFS 3
 
+/* Some displays report a topology change every half minute or so, because the
+   link keeps retraining (a Samsung G9 with VRR on DisplayPort, observed at 350
+   changes an hour, day and night). Reacting to each one costs a full
+   enumeration, so display changes get a floor on how often they may start a
+   scan. Power, unlock and the manual re-scan are not throttled. */
+#define RESCAN_MIN_INTERVAL_MS 30000
+
 /* Idle auto-dim poll. GetLastInputInfo costs nothing and we only touch the
    monitors on a state transition, so the interval is set by how fast the
    brightness must come back once the user returns, not by polling cost. */
@@ -82,6 +89,7 @@ static DWORD        g_rescanGeneration = 0;   /* incremented per launch */
 static DWORD        g_rescanAwaitedGen = 0;   /* the only generation whose result we accept */
 static int          g_rescanRetry = 0;        /* index into kRescanBackoffMs */
 static int          g_rescanWriteOffs = 0;    /* consecutive workers the watchdog gave up on */
+static DWORD        g_lastRescanTick = 0;     /* when the last worker was launched */
 
 static const WCHAR APPCLASS[] = L"LumosMain";
 
@@ -507,6 +515,7 @@ static void StartRescan(HWND hwnd)
     if (h) {
         CloseHandle(h);
         DbgLog("rescan: worker %lu launched", args->gen);
+        g_lastRescanTick = g_rescanStartTick;
         SetTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID, RESCAN_WATCHDOG_MS, NULL);
     } else {
         free(args);
@@ -520,6 +529,20 @@ static void StartRescan(HWND hwnd)
 static void ScheduleRescan(HWND hwnd)
 {
     SetTimer(hwnd, RESCAN_TIMER_ID, RESCAN_DEBOUNCE_MS, NULL);
+}
+
+/* Throttled entry point for display changes: scan no sooner than
+   RESCAN_MIN_INTERVAL_MS after the last one, but always scan eventually, so a
+   real plug or unplug is delayed rather than dropped. */
+static void ScheduleRescanThrottled(HWND hwnd)
+{
+    g_rescanWriteOffs = 0;
+    g_rescanRetry = 0;
+    DWORD since = GetTickCount() - g_lastRescanTick;
+    DWORD delay = (since >= RESCAN_MIN_INTERVAL_MS)
+                  ? RESCAN_DEBOUNCE_MS
+                  : RESCAN_MIN_INTERVAL_MS - since;
+    SetTimer(hwnd, RESCAN_TIMER_ID, delay, NULL);
 }
 
 /* A display change, an unlock or a manual re-scan is a fresh start: clear the
@@ -796,7 +819,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_DISPLAYCHANGE:
         /* Monitor plugged/unplugged (resolution/topology change) */
-        ScheduleRescanFromTrigger(hwnd);
+        DbgLog("display change: %ux%u bpp=%u",
+               (unsigned)LOWORD(lParam), (unsigned)HIWORD(lParam), (unsigned)wParam);
+        ScheduleRescanThrottled(hwnd);
         return 0;
 
     case WM_WTSSESSION_CHANGE:
@@ -871,7 +896,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                describe a display topology we have already replaced. */
             DbgLog("rescan: discarding late result from worker %lu", gen);
             if (fresh) {
-                TIMED("rescan late: Monitor_Cleanup", Monitor_Cleanup(fresh));
+                TIMED("rescan late: cleanup",
+                      Monitor_CleanupExcept(fresh, &g_monitors));
                 free(fresh);
             }
             return 0;   /* the busy flag belongs to the current worker now */
@@ -894,7 +920,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             DWORD delay = kRescanBackoffMs[g_rescanRetry++];
             DbgLog("rescan: nothing controllable, retry %d in %lu ms",
                    g_rescanRetry, delay);
-            TIMED("rescan rejected: Monitor_Cleanup", Monitor_Cleanup(fresh));
+            TIMED("rescan rejected: cleanup",
+                  Monitor_CleanupExcept(fresh, &g_monitors));
             free(fresh);
             SetTimer(hwnd, RESCAN_RETRY_TIMER_ID, delay, NULL);
             g_rescanBusy = 0;
@@ -903,8 +930,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         g_rescanRetry = 0;
 
         if (fresh) {
-            /* Releasing stale handles is itself a DDC call and can block. */
-            TIMED("rescan done: Monitor_Cleanup", Monitor_Cleanup(&g_monitors));
+            /* Release the handles we are replacing, except any the fresh list
+               has acquired again: destroying those would invalidate the list we
+               are about to adopt. */
+            TIMED("rescan done: cleanup",
+                  Monitor_CleanupExcept(&g_monitors, fresh));
             g_monitors = *fresh;            /* adopt fresh list (plain struct copy) */
             free(fresh);
             Settings_LoadDeltas(&g_settings, &g_monitors);
