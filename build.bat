@@ -25,14 +25,14 @@ if errorlevel 1 (
 :: Compile and link (all intermediates and the exe go to build\)
 cl /nologo /O2 /W4 /WX- %DEFS% ^
    lumos.c monitor.c brightmap.c ui.c ui_draw.c ui_popup.c ui_osd.c ui_menu.c ^
-   ui_sched.c ui_settings.c ui_about.c presets.c schedule.c hotkey.c a11y.c ^
-   remote.c wmibright.c capture.c ^
+   ui_sched.c ui_settings.c ui_about.c ui_hass.c presets.c schedule.c hotkey.c ^
+   a11y.c remote.c wmibright.c capture.c hass.c json.c ambient.c secret.c ^
    build\lumos.res ^
    /Fo"build\\" /Fe:build\lumos.exe ^
    /link /subsystem:windows ^
    dxva2.lib user32.lib gdi32.lib shell32.lib ^
    comctl32.lib advapi32.lib ole32.lib oleaut32.lib wbemuuid.lib ^
-   dwmapi.lib wtsapi32.lib oleacc.lib kernel32.lib
+   dwmapi.lib wtsapi32.lib oleacc.lib winhttp.lib crypt32.lib uxtheme.lib kernel32.lib
 
 if errorlevel 1 (
     echo Build failed.
