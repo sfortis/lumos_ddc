@@ -109,6 +109,15 @@ static void BuildContextMenu(CtxMenuData *d, Settings *s)
         it->checked = s->idleDimEnabled;
     }
 
+    /* Only once a light sensor is chosen; before that the switch would do nothing. */
+    if (s->haSensor[0] && d->count < MAX_CTX_ITEMS) {
+        CtxMenuItem *it = &d->items[d->count++];
+        it->type = CTX_ITEM_NORMAL;
+        it->id = IDM_AUTO_TOGGLE;
+        wcscpy(it->label, L"Auto Brightness (Light Sensor)");
+        it->checked = s->haAutoEnabled;
+    }
+
     /* Separator */
     if (d->count < MAX_CTX_ITEMS) {
         CtxMenuItem *it = &d->items[d->count++];

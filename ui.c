@@ -18,6 +18,7 @@ BOOL UI_Init(HINSTANCE hInst)
     UiSched_Init(hInst);
     UiSettings_Init(hInst);
     UiAbout_Init(hInst);
+    UiHass_Init(hInst);
 
     return TRUE;
 }

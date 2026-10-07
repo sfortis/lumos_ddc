@@ -57,5 +57,6 @@ void UiSched_Shutdown(void);
 void UiSettings_Init(HINSTANCE hInst);
 void UiSettings_Shutdown(void);
 void UiAbout_Init(HINSTANCE hInst);
+void UiHass_Init(HINSTANCE hInst);
 
 #endif /* UI_INTERNAL_H */

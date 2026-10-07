@@ -10,11 +10,14 @@ static HWND g_setHwnd = NULL;
 /* Rows are data, not code: the table below drives rendering, hit testing,
    keyboard focus and the screen reader model, so adding a setting later is one
    BuildSettingsRows line. */
-enum { SET_SECTION = 0, SET_TOGGLE, SET_NUMBER, SET_HOTKEY };
+enum { SET_SECTION = 0, SET_TOGGLE, SET_NUMBER, SET_HOTKEY, SET_ACTION };
+
+/* What a SET_ACTION row does when it is clicked or activated. */
+enum { SET_ACT_HASS = 1, SET_ACT_RESET_CURVE };
 enum { SET_UNIT_PLAIN = 0, SET_UNIT_PERCENT, SET_UNIT_MINUTES };
 
 /* Hit kinds returned by SetHitTest. */
-enum { SETHIT_NONE = 0, SETHIT_MINUS, SETHIT_PLUS, SETHIT_TOGGLE, SETHIT_HOTKEY, SETHIT_ROW };
+enum { SETHIT_NONE = 0, SETHIT_MINUS, SETHIT_PLUS, SETHIT_TOGGLE, SETHIT_HOTKEY, SETHIT_ROW, SETHIT_ACTION };
 
 typedef struct {
     int    kind;
@@ -25,6 +28,7 @@ typedef struct {
     int    lo, hi;    /* SET_NUMBER bounds */
     int    step;      /* SET_NUMBER increment (minutes scale instead, see SetStepFor) */
     int    unit;
+    int    action;    /* SET_ACTION: a SET_ACT_* value */
 } SetRow;
 
 #define MAX_SET_ROWS (MAX_PRESETS + MAX_MONITORS + 16)
@@ -42,6 +46,8 @@ typedef struct {
     int   presetCount;
     int   rangeLo[MAX_RANGES];     /* per Settings range entry */
     int   rangeCount;              /* entries when the window opened; a rescan may add more */
+    BOOL  haAutoEnabled;
+    BOOL  haResetCurve;            /* forget the learned points on Save */
     Hotkey hotkeys[HOTKEY_COUNT];
 
     SetRow rows[MAX_SET_ROWS];
@@ -103,6 +109,12 @@ static void SetAddHotkey(SetEditData *d, const WCHAR *label, Hotkey *val)
     if (r) r->hval = val;
 }
 
+static void SetAddAction(SetEditData *d, const WCHAR *label, int action)
+{
+    SetRow *r = SetAddRow(d, SET_ACTION, label);
+    if (r) r->action = action;
+}
+
 static void BuildSettingsRows(SetEditData *d)
 {
     d->rowCount = 0;
@@ -123,6 +135,11 @@ static void BuildSettingsRows(SetEditData *d)
 
     SetAddRow(d, SET_SECTION, L"SCHEDULE");
     SetAddToggle(d, L"Brightness schedule", &d->scheduleEnabled);
+
+    SetAddRow(d, SET_SECTION, L"HOME ASSISTANT");
+    SetAddAction(d, L"Light sensor", SET_ACT_HASS);
+    SetAddToggle(d, L"Auto brightness", &d->haAutoEnabled);
+    SetAddAction(d, L"Learned curve", SET_ACT_RESET_CURVE);
 
     /* The low end of each connected monitor's range: its level at All
        Monitors 0%. The high end is set in the popup. */
@@ -222,6 +239,23 @@ static void SetAdjust(SetRow *r, int dir)
     *r->ival = v;
 }
 
+/* The text on the right of an action row, also read by screen readers. */
+static void SetActionText(SetEditData *d, SetRow *r, WCHAR *buf, int cch)
+{
+    const Settings *s = d->settings;
+    if (r->action == SET_ACT_HASS) {
+        lstrcpynW(buf, s->haSensor[0] ? (s->haSensorLabel[0] ? s->haSensorLabel : s->haSensor)
+                                      : L"Not set up", cch);
+    } else if (d->haResetCurve) {
+        lstrcpynW(buf, L"Reset on Save", cch);
+    } else if (s->haCurve.count == 0) {
+        lstrcpynW(buf, L"Default", cch);
+    } else {
+        _snwprintf(buf, cch - 1, L"%d points, click to reset", s->haCurve.count);
+        buf[cch - 1] = L'\0';
+    }
+}
+
 /* Returns the row under (x,y) and sets *outHit, or -1 for none. */
 static int SetHitTest(SetEditData *d, int x, int y, int *outHit)
 {
@@ -232,6 +266,10 @@ static int SetHitTest(SetEditData *d, int x, int y, int *outHit)
         int rh = SetRowHeight(r);
         if (y >= top && y < top + rh) {
             if (r->kind == SET_SECTION) return -1;
+            if (r->kind == SET_ACTION) {
+                *outHit = SETHIT_ACTION;
+                return i;
+            }
             if (r->kind == SET_TOGGLE) {
                 RECT rc;
                 SetToggleRect(top, &rc);
@@ -347,14 +385,26 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
             DeleteObject(hb);
         }
 
-        int labelRight = (r->kind == SET_HOTKEY) ? w - 184 : w - 124;
+        int labelRight = (r->kind == SET_HOTKEY) ? w - 184 : (r->kind == SET_ACTION) ? w - 196 : w - 124;
         RECT rcLabel = { 16, y, labelRight, y + SET_ROW_H };
         SelectObject(dc, hFont);
         SetTextColor(dc, HexToColorRef(CLR_TEXT));
         DrawTextW(dc, r->label, -1, &rcLabel,   /* monitor and preset names may hold "&" */
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        if (r->kind == SET_TOGGLE) {
+        if (r->kind == SET_ACTION) {
+            WCHAR val[200];
+            SetActionText(d, r, val, 200);
+            RECT rcV = { w - 192, y, w - 30, y + SET_ROW_H };
+            SelectObject(dc, hFontSmall);
+            SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
+            DrawTextW(dc, val, -1, &rcV,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            RECT rcC = { w - 28, y, w - 14, y + SET_ROW_H };
+            SelectObject(dc, hFont);
+            SetTextColor(dc, HexToColorRef(CLR_ACCENT));
+            DrawTextW(dc, L"\x203A", -1, &rcC, DT_CENTER | DT_VCENTER | DT_SINGLELINE);   /* single angle quote */
+        } else if (r->kind == SET_TOGGLE) {
             RECT rcT;
             SetToggleRect(y, &rcT);
             BOOL on = (r->bval && *r->bval);
@@ -517,6 +567,15 @@ static void SetA11yDescribe(void *ctx, int index, A11yItem *out)
         wcsncpy(out->name, r->label, 159);
         wcscpy(out->action, L"Toggle");
         break;
+    case SET_ACTION: {
+        WCHAR val[200];
+        SetActionText(d, r, val, 200);
+        out->role = ROLE_SYSTEM_PUSHBUTTON;
+        _snwprintf(out->name, 159, L"%s: %s", r->label, val);
+        out->name[159] = L'\0';
+        wcscpy(out->action, L"Press");
+        break;
+    }
     case SET_NUMBER:
         out->role = ROLE_SYSTEM_SPINBUTTON;
         wcsncpy(out->name, r->label, 159);
@@ -715,6 +774,9 @@ static void SetCommit(SetEditData *d)
         s->hotkeys[i] = d->hotkeys[i];
     for (int i = 0; i < d->rangeCount && i < s->rangeCount; i++)
         s->rangeLo[i] = d->rangeLo[i];
+    s->haAutoEnabled = d->haAutoEnabled;
+    if (d->haResetCurve)
+        s->haCurve.count = 0;   /* back to the default curve */
 }
 
 static int SetRowOfHotkey(SetEditData *d, int action)
@@ -762,6 +824,18 @@ static void SetTrySave(HWND hwnd, SetEditData *d)
     PostMessageW(owner, WM_COMMAND, (WPARAM)IDM_SETTINGS_SAVED, 0);
 }
 
+static void SetRunAction(HWND hwnd, SetEditData *d, int row)
+{
+    SetRow *r = &d->rows[row];
+    if (r->action == SET_ACT_HASS) {
+        /* Owned by this window, so this window stays open behind it. */
+        UI_ShowHomeAssistant(hwnd, d->settings, d->owner);
+    } else if (r->action == SET_ACT_RESET_CURVE && d->settings->haCurve.count > 0) {
+        d->haResetCurve = !d->haResetCurve;
+        SetRowChanged(hwnd, d, row);
+    }
+}
+
 /* Activate a row the way a click on its control would. */
 static void SetActivate(HWND hwnd, SetEditData *d, int row)
 {
@@ -779,6 +853,8 @@ static void SetActivate(HWND hwnd, SetEditData *d, int row)
         SetRowChanged(hwnd, d, row);
     } else if (r->kind == SET_HOTKEY) {
         SetBeginCapture(hwnd, d, row);
+    } else if (r->kind == SET_ACTION) {
+        SetRunAction(hwnd, d, row);
     }
 }
 
@@ -831,7 +907,8 @@ static void SetKeyDown(HWND hwnd, SetEditData *d, WPARAM vk)
     case VK_RETURN:
         /* A switch, a hotkey row or a button does its own thing; from a number
            row Enter saves, as the default button of a dialog would. */
-        if (row == SET_CANCEL(d) || (r && (r->kind == SET_TOGGLE || r->kind == SET_HOTKEY)))
+        if (row == SET_CANCEL(d) ||
+            (r && (r->kind == SET_TOGGLE || r->kind == SET_HOTKEY || r->kind == SET_ACTION)))
             SetActivate(hwnd, d, row);
         else
             SetTrySave(hwnd, d);
@@ -931,6 +1008,9 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 SetRowChanged(hwnd, d, row);
             } else if (hit == SETHIT_HOTKEY && d->captureRow != row) {
                 SetBeginCapture(hwnd, d, row);
+            } else if (hit == SETHIT_ACTION) {
+                RenderSettings(hwnd, d);
+                SetRunAction(hwnd, d, row);
             } else if (hit == SETHIT_ROW) {
                 RenderSettings(hwnd, d);
                 BeginWindowDrag(hwnd);   /* the label is not a control: it moves the window */
@@ -971,9 +1051,17 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
     case WM_ACTIVATE:
         if (LOWORD(wParam) == WA_INACTIVE) {
-            /* Dismiss without saving on click-outside, like the schedule editor. */
+            /* Dismiss without saving on click-outside, like the schedule editor.
+               The Home Assistant window is opened from here and is owned by
+               this one, so losing the focus to it (or to the browser the user
+               copies a token from while it is open) keeps this window. */
+            HWND ha = UI_HassWindow();
+            if (ha && ((HWND)lParam == ha || IsWindowVisible(ha)))
+                return 0;
             DestroyWindow(hwnd);
             g_setHwnd = NULL;
+        } else {
+            RenderSettings(hwnd, d);   /* the sensor may have changed in the HA window */
         }
         return 0;
 
@@ -1014,6 +1102,7 @@ void UI_ShowSettings(HWND hwndOwner, Settings *s)
     for (int i = 0; i < HOTKEY_COUNT; i++)
         g_set.hotkeys[i] = s->hotkeys[i];
     g_set.rangeCount = s->rangeCount;
+    g_set.haAutoEnabled = s->haAutoEnabled;
     for (int i = 0; i < s->rangeCount; i++)
         g_set.rangeLo[i] = s->rangeLo[i];
     BuildSettingsRows(&g_set);

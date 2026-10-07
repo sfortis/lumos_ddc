@@ -16,6 +16,8 @@
 #include "presets.h"
 #include "capture.h"
 #include "remote.h"
+#include "hass.h"
+#include "ambient.h"
 
 /* GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
    Defined manually because some MinGW headers omit it. Fires on display
@@ -35,6 +37,7 @@ static const GUID kGuidConsoleDisplayState =
 /* Posted by the mouse hook when wheel notches over the tray icon start to
    pile up; the notches themselves are counted in g_wheelPending. */
 #define WM_APP_WHEEL        (WM_APP + 2)
+#define WM_APP_AUTO_READING (WM_APP + 3)   /* a Home Assistant poll finished */
 
 /* Schedule tick: recompute the interpolated brightness once a minute. */
 #define SCHEDULE_TIMER_ID   0xB101
@@ -81,6 +84,18 @@ static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
    brightness must come back once the user returns, not by polling cost. */
 #define IDLE_TIMER_ID       0xB102
 #define IDLE_TICK_MS        2000
+
+/* Auto brightness from a Home Assistant illuminance sensor. Indoor sensors
+   report every few minutes at best, so polling faster gains nothing. After
+   AUTO_OFFLINE_AFTER failed polls in a row the schedule takes over until
+   Home Assistant answers again. The learned curve is written to config.ini
+   AUTO_SAVE_DELAY_MS after the last manual change, so a run of wheel notches
+   writes once. */
+#define AUTO_TIMER_ID       0xB105
+#define AUTO_POLL_MS        30000
+#define AUTO_OFFLINE_AFTER  3
+#define AUTO_SAVE_TIMER_ID  0xB106
+#define AUTO_SAVE_DELAY_MS  3000
 
 static HINSTANCE    g_hInst;
 static HWND         g_hwndHidden;    /* Hidden top-level window (receives broadcasts + notifications) */
@@ -154,6 +169,10 @@ static void PopupChange(int masterLevel);
 static int  MasterTargetFromMonitors(void);
 static void Idle_Tick(void);
 static void Idle_Restore(void);
+static BOOL Auto_Owns(void);
+static void Auto_Apply(BOOL force);
+static void Auto_Learn(void);
+static void Auto_Configure(void);
 
 /* A monitor's range changed in the popup. Save it, then put every monitor
    back on the current master level so the change shows at once: matching two
@@ -259,9 +278,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
        feature is off, which keeps enable/disable free of timer bookkeeping. */
     SetTimer(g_hwndHidden, IDLE_TIMER_ID, IDLE_TICK_MS, NULL);
 
+    Auto_Configure();   /* polls the light sensor when auto brightness is set up */
+
     /* Message loop */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (UI_HassDialogMessage(&msg))
+            continue;   /* Tab, Enter and Esc between the Home Assistant window's fields */
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -801,6 +824,8 @@ static void Schedule_ApplyNow(void)
 {
     if (!g_settings.scheduleEnabled || g_settings.scheduleCount == 0)
         return;
+    if (Auto_Owns())
+        return;   /* the light sensor sets the level; the schedule is the fallback */
 
     /* The idle level owns the monitors right now. Leave it alone and force a
        re-push once the user is back, since by then the schedule value for the
@@ -842,6 +867,10 @@ static void ReapplyBrightness(void)
     if (g_idleDimmed) {
         TIMED("reapply(idle level): SetAllBrightness",
               Monitor_SetAllBrightness(&g_monitors, g_settings.idleDimPercent));
+        return;
+    }
+    if (Auto_Owns()) {
+        Auto_Apply(TRUE);   /* the level for the light now, not the one before */
         return;
     }
     if (g_settings.scheduleEnabled && g_settings.scheduleCount > 0 && !g_scheduleSuspended) {
@@ -890,6 +919,7 @@ static void ManualChange(void)
 {
     g_idleDimmed = FALSE;   /* the user just set a level; do not restore over it */
     Schedule_Suspend();
+    Auto_Learn();           /* with auto brightness on, the change becomes a curve point */
 }
 
 /* A popup slider moved. The next hotkey or wheel step starts from
@@ -988,6 +1018,181 @@ static void Idle_Tick(void)
     BOOL idle = IdleMilliseconds() >= (DWORD)g_settings.idleDimMinutes * 60000u;
     if (idle && !g_idleDimmed)       Idle_Dim();
     else if (!idle && g_idleDimmed)  Idle_Restore();
+}
+
+/* ---- Auto brightness from Home Assistant ----
+ *
+ * A timer starts a worker that reads the sensor over the network; the reading
+ * comes back as WM_APP_AUTO_READING on this thread. The value is smoothed and
+ * gated (ambient.c) before it moves the level, and the level goes through
+ * g_masterTarget like every other change, so the hotkeys continue from it. */
+
+typedef struct {
+    WCHAR url[HASS_URL_MAX];
+    char  token[HASS_TOKEN_MAX];
+    WCHAR entity[HASS_ENTITY_MAX];
+    HWND  hwnd;
+    DWORD gen;
+} AutoJob;
+
+typedef struct {
+    DWORD      gen;
+    HassStatus status;
+    BOOL       hasValue;
+    double     lux;
+} AutoReading;
+
+static BOOL          g_autoBusy;        /* a worker is reading the sensor */
+static DWORD         g_autoGen;         /* a reading from before a reconfigure is dropped */
+static AmbientFilter g_autoFilter;
+static AmbientGate   g_autoGate;
+static double        g_autoLux = -1;    /* smoothed lux, -1 until the first reading */
+static int           g_autoFailures;    /* failed polls in a row */
+static BOOL          g_autoOnline;      /* Home Assistant answered recently */
+static BOOL          g_autoWasEnabled;  /* haAutoEnabled when Auto_Configure last ran */
+static int           g_autoCurvePoints; /* learned points then, to notice a reset */
+
+static BOOL Auto_Configured(void)
+{
+    const Settings *s = &g_settings;
+    return s->haAutoEnabled && s->haUrl[0] && s->haToken[0] && s->haSensor[0];
+}
+
+/* Auto brightness owns the level: it is set up and Home Assistant answers. */
+static BOOL Auto_Owns(void)
+{
+    return Auto_Configured() && g_autoOnline;
+}
+
+static DWORD WINAPI AutoThread(LPVOID param)
+{
+    AutoJob *job = (AutoJob *)param;
+    AutoReading *r = (AutoReading *)calloc(1, sizeof(AutoReading));
+    if (r) {
+        r->gen = job->gen;
+        r->status = Hass_ReadLux(job->url, job->token, job->entity, &r->lux, &r->hasValue);
+        if (!PostMessageW(job->hwnd, WM_APP_AUTO_READING, 0, (LPARAM)r))
+            free(r);
+    }
+    SecureZeroMemory(job->token, sizeof(job->token));
+    free(job);
+    return 0;
+}
+
+static void Auto_Poll(void)
+{
+    if (g_autoBusy || !Auto_Configured())
+        return;
+    AutoJob *job = (AutoJob *)calloc(1, sizeof(AutoJob));
+    if (!job)
+        return;
+    lstrcpynW(job->url, g_settings.haUrl, HASS_URL_MAX);
+    lstrcpynA(job->token, g_settings.haToken, HASS_TOKEN_MAX);
+    lstrcpynW(job->entity, g_settings.haSensor, HASS_ENTITY_MAX);
+    job->hwnd = g_hwndHidden;
+    job->gen = g_autoGen;
+    HANDLE h = CreateThread(NULL, 0, AutoThread, job, 0, NULL);
+    if (!h) {
+        SecureZeroMemory(job->token, sizeof(job->token));
+        free(job);
+        return;
+    }
+    CloseHandle(h);
+    g_autoBusy = TRUE;
+}
+
+/* Move the monitors to the curve's level for the current light. force skips
+   the gate, for a restore after a wake or an idle dim. */
+static void Auto_Apply(BOOL force)
+{
+    if (!Auto_Owns() || g_autoLux < 0 || g_idleDimmed)
+        return;
+    int target = Ambient_LevelFor(&g_settings.haCurve, g_autoLux);
+    if (force)
+        Ambient_GateReset(&g_autoGate);
+    if (!Ambient_Decide(&g_autoGate, target))
+        return;
+    DbgLog("auto: %.1f lx -> %d%%", g_autoLux, target);
+    g_masterTarget = target;
+    TIMED("auto: SetAllBrightness", Monitor_SetAllBrightness(&g_monitors, target));
+    UI_RefreshPopup(g_hwndPopup, &g_monitors);
+}
+
+static void Auto_OnReading(AutoReading *r)
+{
+    BOOL current = (r->gen == g_autoGen);
+    g_autoBusy = FALSE;
+    if (!current || !Auto_Configured()) {
+        free(r);
+        return;
+    }
+    if (r->status == HASS_OK) {
+        g_autoFailures = 0;
+        if (!g_autoOnline) {
+            DbgLog("auto: Home Assistant answers again");
+            g_autoOnline = TRUE;
+            Ambient_GateReset(&g_autoGate);
+        }
+        if (r->hasValue) {
+            g_autoLux = Ambient_Smooth(&g_autoFilter, r->lux);
+            Auto_Apply(FALSE);
+        }
+        /* "unavailable" or "unknown": keep the level we have */
+    } else if (++g_autoFailures >= AUTO_OFFLINE_AFTER && g_autoOnline) {
+        DbgLog("auto: %d failed polls (status %d), the schedule takes over",
+               g_autoFailures, (int)r->status);
+        g_autoOnline = FALSE;
+        g_scheduleLastApplied = -1;
+        Schedule_ApplyNow();
+    }
+    free(r);
+}
+
+/* A manual change while auto brightness owns the level: remember it as the
+   level wanted for the current light. */
+static void Auto_Learn(void)
+{
+    if (!Auto_Owns() || g_autoLux < 0 || g_masterTarget < 0)
+        return;
+    Ambient_Learn(&g_settings.haCurve, g_autoLux, g_masterTarget);
+    /* Start the gate from the level the user chose, so the next reading does
+       not move it right back. */
+    Ambient_GateReset(&g_autoGate);
+    Ambient_Decide(&g_autoGate, g_masterTarget);
+    g_autoCurvePoints = g_settings.haCurve.count;
+    SetTimer(g_hwndHidden, AUTO_SAVE_TIMER_ID, AUTO_SAVE_DELAY_MS, NULL);
+}
+
+/* Start, restart or stop polling after the settings changed. */
+static void Auto_Configure(void)
+{
+    g_autoWasEnabled = g_settings.haAutoEnabled;
+    g_autoCurvePoints = g_settings.haCurve.count;
+    g_autoGen++;
+    g_autoBusy = FALSE;   /* a worker still running reports with the old generation */
+    g_autoFailures = 0;
+    g_autoLux = -1;
+    memset(&g_autoFilter, 0, sizeof(g_autoFilter));
+    Ambient_GateReset(&g_autoGate);
+    KillTimer(g_hwndHidden, AUTO_TIMER_ID);
+    if (Auto_Configured()) {
+        /* Assume Home Assistant answers until polls say otherwise, so the
+           schedule does not jump in for the first seconds. */
+        g_autoOnline = TRUE;
+        SetTimer(g_hwndHidden, AUTO_TIMER_ID, AUTO_POLL_MS, NULL);
+        Auto_Poll();
+    } else if (g_autoOnline) {
+        g_autoOnline = FALSE;
+        g_scheduleLastApplied = -1;   /* auto brightness off: the schedule resumes */
+        Schedule_ApplyNow();
+    }
+}
+
+static void SetAutoEnabled(BOOL on)
+{
+    g_settings.haAutoEnabled = on;
+    Settings_Save(&g_settings);
+    Auto_Configure();
 }
 
 /* ---- Switches shared by the tray menu and lumosctl ---- */
@@ -1093,6 +1298,13 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case IDM_IDLEDIM_TOGGLE:
             SetIdleDimEnabled(!g_settings.idleDimEnabled);
             break;
+        case IDM_AUTO_TOGGLE:
+            SetAutoEnabled(!g_settings.haAutoEnabled);
+            break;
+        case IDM_HASS_SAVED:
+            Settings_Save(&g_settings);
+            Auto_Configure();
+            break;
         case IDM_SETTINGS:
             UI_ShowSettings(hwnd, &g_settings);
             break;
@@ -1122,6 +1334,13 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (!g_settings.idleDimEnabled)
                 Idle_Restore();           /* undo an active dim right away */
+            /* Auto brightness switched on or off, or its learned curve reset. */
+            if (g_settings.haAutoEnabled != g_autoWasEnabled) {
+                Auto_Configure();
+            } else if (g_settings.haCurve.count != g_autoCurvePoints) {
+                g_autoCurvePoints = g_settings.haCurve.count;
+                Auto_Apply(TRUE);
+            }
             g_scheduleSuspended = FALSE;  /* a schedule toggle takes effect now */
             g_scheduleLastApplied = -1;
             Schedule_ApplyNow();
@@ -1190,6 +1409,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Schedule_ApplyNow();
         } else if (wParam == IDLE_TIMER_ID) {
             Idle_Tick();
+        } else if (wParam == AUTO_TIMER_ID) {
+            Auto_Poll();
+        } else if (wParam == AUTO_SAVE_TIMER_ID) {
+            KillTimer(hwnd, AUTO_SAVE_TIMER_ID);
+            Settings_Save(&g_settings);   /* the curve learned from manual changes */
         } else if (wParam == RESCAN_WATCHDOG_TIMER_ID) {
             KillTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID);
             if (g_rescanBusy) {
@@ -1215,6 +1439,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             else
                 StartRescan(hwnd);
         }
+        return 0;
+
+    case WM_APP_AUTO_READING:
+        Auto_OnReading((AutoReading *)lParam);
         return 0;
 
     case WM_APP_RESCAN_DONE: {

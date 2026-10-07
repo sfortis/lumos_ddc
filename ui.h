@@ -99,6 +99,17 @@ void UI_ShowScheduleEditor(HWND hwndOwner, Settings *s);
    posts WM_COMMAND(IDM_SETTINGS_SAVED) to hwndOwner. */
 void UI_ShowSettings(HWND hwndOwner, Settings *s);
 
+/* Home Assistant window: URL, token and the illuminance sensor list. Save
+   writes the URL, the token and the chosen sensor into *s and posts
+   WM_COMMAND(IDM_HASS_SAVED) to notify. */
+void UI_ShowHomeAssistant(HWND hwndOwner, Settings *s, HWND notify);
+
+/* For the message loop: Tab, Enter and Esc in the Home Assistant window. */
+BOOL UI_HassDialogMessage(MSG *msg);
+
+/* The Home Assistant window, or NULL when it is closed. */
+HWND UI_HassWindow(void);
+
 /* The settings window cannot register hotkeys itself, because the owner window
    holds them. apply tries a full set and returns -1 when every hotkey was
    registered, or the HOTKEY_* action that failed (the previous set is then

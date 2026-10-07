@@ -20,6 +20,8 @@
 #define IDM_IDLEDIM_TOGGLE  2008
 #define IDM_SETTINGS        2009
 #define IDM_SETTINGS_SAVED  2010
+#define IDM_HASS_SAVED      2011   /* the Home Assistant window saved its settings */
+#define IDM_AUTO_TOGGLE     2012
 #define IDM_PRESET_BASE     3000
 
 /* ---- App identity (shown in the About window) ---- */
