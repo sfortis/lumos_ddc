@@ -26,7 +26,7 @@
 
 /* ---- App identity (shown in the About window) ---- */
 #define APP_NAME            L"Lumos"
-#define APP_VERSION         L"1.2.0"
+#define APP_VERSION         L"1.3.0-beta.1"
 #define APP_AUTHOR          L"sfortis"
 #define APP_REPO_DISPLAY    L"github.com/sfortis/lumos_ddc"
 #define APP_REPO_URL        L"https://github.com/sfortis/lumos_ddc"
