@@ -146,7 +146,7 @@ If you run [Home Assistant](https://www.home-assistant.io/) and have an illumina
 
 1. In Home Assistant, create a long-lived access token (your profile, Security tab). A non-admin user is enough, and a dedicated user for Lumos is a good idea.
 2. Open Settings in Lumos and click **Light sensor** in the HOME ASSISTANT section. The Home Assistant window opens.
-3. Enter the address of your server (for example `https://homeassistant.local:8123`) and paste the token, then press **Connect**.
+3. Enter the address of your server and paste the token, then press **Connect**. On a home network the address is usually `http://192.168.1.10:8123` (with the IP address of your server) or `http://homeassistant.local:8123`. When you leave out `http://`, Lumos adds it.
 4. Lumos lists every sensor whose device class is illuminance, with its area and its current reading. Choose the sensor in the room of this PC and press **Save**.
 5. Turn on **Auto brightness** in Settings, or choose **Auto Brightness (Light Sensor)** in the tray menu. That menu item appears once a sensor is chosen.
 
@@ -174,7 +174,7 @@ The brightness schedule is paused while auto brightness controls the level. Whil
 
 ### The token
 
-The token is stored in `config.ini` encrypted with Windows DPAPI, so only your Windows account on this PC can read it. Copying `config.ini` to another account or another PC leaves the token behind, and Lumos asks for it again. When you change the address, Lumos does not send the saved token to the new address and asks for the token again. Certificates are always checked. An `http://` address works, but the window shows a red warning, because the token then travels unencrypted.
+The token is stored in `config.ini` encrypted with Windows DPAPI, so only your Windows account on this PC can read it. Copying `config.ini` to another account or another PC leaves the token behind, and Lumos asks for it again. When you change the address, Lumos does not send the saved token to the new address and asks for the token again. Certificates are always checked, so an `https://` address must use the name the certificate was issued for, not the IP address. An `http://` address works too, but the token then travels unencrypted. For an address on the local network (a private IP address, or a name such as `homeassistant.local`) the window says so in a grey note, and for any other address it shows a red warning.
 
 ## Keyboard and screen readers
 

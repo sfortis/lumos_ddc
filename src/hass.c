@@ -1,4 +1,5 @@
 #include "hass.h"
+#include "hassurl.h"
 #include "json.h"
 #include <winhttp.h>
 #include <stdio.h>
@@ -48,7 +49,10 @@ static HassStatus OpenConn(HassConn *c, const WCHAR *url)
     URL_COMPONENTS uc = { sizeof(uc) };
     uc.lpszHostName = host;  uc.dwHostNameLength = HASS_URL_MAX;
     uc.lpszUrlPath = path;   uc.dwUrlPathLength = HASS_URL_MAX;
-    if (!url || !*url || !WinHttpCrackUrl(url, 0, 0, &uc) || !host[0])
+    /* config.ini may hold an address typed by hand, without a scheme. */
+    WCHAR full[HASS_URL_MAX];
+    if (!url || !HassUrl_Normalize(url, full, HASS_URL_MAX) ||
+        !WinHttpCrackUrl(full, 0, 0, &uc) || !host[0])
         return HASS_ERR_URL;
     if (uc.nScheme != INTERNET_SCHEME_HTTP && uc.nScheme != INTERNET_SCHEME_HTTPS)
         return HASS_ERR_URL;
@@ -494,13 +498,15 @@ const WCHAR *Hass_StatusText(HassStatus status)
 {
     switch (status) {
     case HASS_OK:            return L"Connected.";
-    case HASS_ERR_URL:       return L"The URL is not valid. It should look like https://homeassistant.local:8123";
+    case HASS_ERR_URL:       return L"The URL is not valid. Example: http://192.168.1.10:8123";
     case HASS_ERR_RESOLVE:   return L"The host name was not found.";
     case HASS_ERR_CONNECT:   return L"Home Assistant did not answer. Check the URL, and the VPN when you are away.";
-    case HASS_ERR_TLS:       return L"The server certificate was not accepted.";
+    /* Common on a home network: an https certificate issued for a name,
+       reached through the IP address. Validation is never turned off. */
+    case HASS_ERR_TLS:       return L"Certificate not accepted. Use the name it was issued for, or http:// on the LAN.";
     /* A wrong token and a local-only user outside the home network both come
        back as 401, so one message covers both. */
-    case HASS_ERR_AUTH:      return L"Home Assistant refused the token. Check the token, and that this PC is on the home network or the VPN.";
+    case HASS_ERR_AUTH:      return L"Token refused. Check it, and that this PC is on the home network or the VPN.";
     case HASS_ERR_NOT_FOUND: return L"The sensor was not found in Home Assistant.";
     case HASS_ERR_HTTP:      return L"Home Assistant returned an unexpected error.";
     default:                 return L"Home Assistant sent a reply Lumos did not understand.";

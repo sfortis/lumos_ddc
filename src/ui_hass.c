@@ -1,5 +1,6 @@
 #include "ui_internal.h"
 #include "hass.h"
+#include "hassurl.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -136,13 +137,39 @@ static const WCHAR *CurrentToken(const WCHAR *url, char *out, int cap)
 
 /* An http URL sends the token unencrypted. It is allowed, because many
    Home Assistant installations on a home network have no https, but the
-   window says so plainly (user decision). */
+   window says so (user decision): in red for an address outside the home
+   network, as a grey note for one on it, where most users connect. */
 static const WCHAR kHttpWarning[] =
     L"This is http: the token travels unencrypted. Use https if you can.";
+static const WCHAR kHttpLocalNote[] =
+    L"http on the local network: the token is not encrypted on the LAN.";
 
-static BOOL IsPlainHttp(const WCHAR *url)
+/* The address in the field, normalized: trimmed, with http:// added when it
+   has no scheme. Empty when the field is empty. */
+static void ReadUrl(WCHAR *out)
 {
-    return CompareStringOrdinal(url, 7, L"http://", 7, TRUE) == CSTR_EQUAL;
+    WCHAR typed[HASS_URL_MAX];
+    GetWindowTextW(g_ha.url, typed, HASS_URL_MAX);
+    if (!HassUrl_Normalize(typed, out, HASS_URL_MAX))
+        out[0] = L'\0';
+}
+
+/* Show the http warning or note for this URL. For https, a warning or note
+   left from an earlier http address is cleared. Returns FALSE for https. */
+static BOOL ShowHttpStatus(const WCHAR *url)
+{
+    if (!HassUrl_IsHttp(url)) {
+        WCHAR shown[96];
+        GetWindowTextW(g_ha.status, shown, 96);
+        if (lstrcmpW(shown, kHttpWarning) == 0 || lstrcmpW(shown, kHttpLocalNote) == 0)
+            SetStatus(L"", FALSE);
+        return FALSE;
+    }
+    if (HassUrl_IsLocal(url))
+        SetStatus(kHttpLocalNote, FALSE);
+    else
+        SetStatus(kHttpWarning, TRUE);
+    return TRUE;
 }
 
 /* The list belongs to the server it came from. */
@@ -159,7 +186,13 @@ static void StartList(void)
     ListJob *job = (ListJob *)calloc(1, sizeof(ListJob));
     if (!job)
         return;
-    GetWindowTextW(g_ha.url, job->url, HASS_URL_MAX);
+    ReadUrl(job->url);
+    /* Show the address that is used, so "192.168.1.10:8123" becomes
+       "http://192.168.1.10:8123" in the field. */
+    WCHAR shown[HASS_URL_MAX];
+    GetWindowTextW(g_ha.url, shown, HASS_URL_MAX);
+    if (job->url[0] && lstrcmpW(shown, job->url) != 0)
+        SetWindowTextW(g_ha.url, job->url);
     const WCHAR *problem = job->url[0] ? CurrentToken(job->url, job->token, HASS_TOKEN_MAX)
                                        : L"Enter the URL of Home Assistant.";
     if (problem) {
@@ -242,17 +275,19 @@ static void OnListResult(DWORD gen, ListResult *res)
     qsort(g_ha.sensors, (size_t)g_ha.count, sizeof(HassSensor), CompareSensors);
     FillList();
     WCHAR url[HASS_URL_MAX];
-    GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
-    if (IsPlainHttp(url)) {
+    ReadUrl(url);
+    if (HassUrl_IsHttp(url) && !HassUrl_IsLocal(url)) {
         SetStatus(kHttpWarning, TRUE);   /* worth more than the count */
         return;
     }
-    WCHAR msg[96];
+    /* On the home network the http note joins the count in one grey line. */
+    const WCHAR *how = HassUrl_IsHttp(url) ? L"Connected over http on the LAN" : L"Connected";
+    WCHAR msg[128];
     if (g_ha.count == 0)
-        lstrcpyW(msg, L"Connected, but Home Assistant has no illuminance sensor.");
+        _snwprintf(msg, 127, L"%s, but Home Assistant has no illuminance sensor.", how);
     else
-        _snwprintf(msg, 95, L"Connected. Choose the sensor in the room of this PC (%d found).", g_ha.count);
-    msg[95] = L'\0';
+        _snwprintf(msg, 127, L"%s. Choose the sensor in the room of this PC (%d found).", how, g_ha.count);
+    msg[127] = L'\0';
     SetStatus(msg, FALSE);
 }
 
@@ -260,7 +295,7 @@ static void Save(void)
 {
     Settings *s = g_ha.settings;
     WCHAR url[HASS_URL_MAX];
-    GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
+    ReadUrl(url);
     BOOL urlChanged = !SameUrl(url, s->haUrl);
     char token[HASS_TOKEN_MAX];
     const WCHAR *problem = url[0] ? CurrentToken(url, token, HASS_TOKEN_MAX) : NULL;
@@ -514,14 +549,13 @@ static LRESULT CALLBACK HassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 InvalidateRect(hwnd, NULL, FALSE);
             if (LOWORD(wParam) == IDC_URL && HIWORD(wParam) == EN_CHANGE) {
                 WCHAR url[HASS_URL_MAX];
-                GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
+                ReadUrl(url);
                 /* A list from another address must not be saved with this one. */
                 if (g_ha.count > 0) {
                     ClearList();
                     SetStatus(L"Connect to list the sensors of this address.", FALSE);
                 }
-                if (IsPlainHttp(url))
-                    SetStatus(kHttpWarning, TRUE);
+                ShowHttpStatus(url);
             }
             return 0;
         }
