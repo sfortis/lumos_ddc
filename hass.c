@@ -447,7 +447,9 @@ const WCHAR *Hass_StatusText(HassStatus status)
     case HASS_ERR_RESOLVE:   return L"The host name was not found.";
     case HASS_ERR_CONNECT:   return L"Home Assistant did not answer. Check the URL, and the VPN when you are away.";
     case HASS_ERR_TLS:       return L"The server certificate was not accepted.";
-    case HASS_ERR_AUTH:      return L"The token was refused.";
+    /* A wrong token and a local-only user outside the home network both come
+       back as 401, so one message covers both. */
+    case HASS_ERR_AUTH:      return L"Home Assistant refused the token. Check the token, and that this PC is on the home network or the VPN.";
     case HASS_ERR_NOT_FOUND: return L"The sensor was not found in Home Assistant.";
     case HASS_ERR_HTTP:      return L"Home Assistant returned an unexpected error.";
     default:                 return L"Home Assistant sent a reply Lumos did not understand.";
