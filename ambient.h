@@ -6,15 +6,20 @@
  * smoothing that keeps a noisy sensor from making the screens flicker.
  *
  * The curve is a list of (lux, level) points sorted by lux. Between points
- * the level is interpolated over log10(lux + 1), because the eye judges
- * light on a ratio scale: 5 to 10 lx is as large a step as 500 to 1000 lx.
- * Below the first point and above the last one the level stays flat.
+ * the level is interpolated over log10(lux + AMBIENT_LUX_OFFSET), because the
+ * eye judges light on a ratio scale: 50 to 100 lx is as large a step as 500
+ * to 1000 lx. The offset flattens the scale below about 10 lx, where 0 and
+ * 5 lx are both a dark room; with an offset of 1 a noisy sensor that flips
+ * between 0 and 5 lx looked like a large change. Below the first point and
+ * above the last one the level stays flat.
  *
  * Win32-free, unit-tested in test_ambient.c. */
 
 #define AMBIENT_MAX_POINTS 8
 
-/* Two points closer than this in log10(lux + 1) are the same light level, so
+#define AMBIENT_LUX_OFFSET 10.0
+
+/* Two points closer than this on the log scale are the same light level, so
    a new point replaces the old one instead of crowding next to it. */
 #define AMBIENT_SAME_LIGHT 0.15
 
@@ -52,21 +57,24 @@ int Ambient_Parse(const char *text, AmbientCurve *c);
 int Ambient_Format(const AmbientCurve *c, char *out, int cap);
 
 /* Smoothing and gating, tuned by simulating the Living Room FP2, which
- * reports 0 or 5 lx at random. With plain smoothing the level changed about
- * every 5 minutes; with the rules below about every half hour, while a lamp
- * switched on still shows within one reading.
+ * reports 0, 5 or 8 lx at random while the room is dark. Over 16 hours of
+ * 30 s polls the level changes 12 times for 0/5 noise and 40 times for
+ * 0/5/8 noise, while a lamp switched on (8 to 77 lx) shows after 30 s.
  *
- * Smoothing is exponential in log space and adaptive. A reading less than
- * AMBIENT_JUMP decades from the smoothed value (sensor noise, passing clouds)
- * moves it by AMBIENT_SLOW of the distance; a larger one (a lamp switched on
- * or off) moves it by AMBIENT_FAST. */
-#define AMBIENT_JUMP 1.0
+ * A reading less than AMBIENT_STEP from the smoothed value (on the log scale)
+ * is noise or a slow drift and moves it by AMBIENT_SLOW of the distance. A
+ * larger one is held until the next reading confirms it, on the same side
+ * and close to it; then the value jumps to the pair. A real change persists
+ * and a noise spike does not, which tells them apart where their sizes are
+ * alike. */
+#define AMBIENT_STEP 0.35
 #define AMBIENT_SLOW 0.08
-#define AMBIENT_FAST 0.85
 
 typedef struct {
-    int    primed;    /* a first reading has been taken */
-    double logLux;    /* smoothed log10(lux + 1) */
+    int    primed;      /* a first reading has been taken */
+    double logLux;      /* smoothed value on the log scale */
+    int    pending;     /* a large deviation waits for confirmation */
+    double pendingLog;  /* that reading */
 } AmbientFilter;
 
 /* Feed one reading (lux >= 0) and return the smoothed lux. */

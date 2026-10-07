@@ -1047,6 +1047,7 @@ static DWORD         g_autoGen;         /* a reading from before a reconfigure i
 static AmbientFilter g_autoFilter;
 static AmbientGate   g_autoGate;
 static double        g_autoLux = -1;    /* smoothed lux, -1 until the first reading */
+static double        g_autoRawLux = -1; /* the sensor's last value, shown in the popup */
 static int           g_autoFailures;    /* failed polls in a row */
 static BOOL          g_autoOnline;      /* Home Assistant answered recently */
 static BOOL          g_autoNoReading;   /* the last answer was "unavailable" or "unknown" */
@@ -1093,8 +1094,10 @@ static void Auto_PublishInfo(void)
         info.state = AUTO_INFO_CONNECTING;
     else
         info.state = AUTO_INFO_ACTIVE;
-    info.hasLux = (g_autoLux >= 0);
-    info.lux = g_autoLux;
+    /* The panel shows what the sensor says, the same number Home Assistant
+       shows; the smoothed value only steers the level. */
+    info.hasLux = (g_autoRawLux >= 0);
+    info.lux = g_autoRawLux;
     UI_SetAutoInfo(g_hwndPopup, &info);
 }
 
@@ -1170,6 +1173,7 @@ static void Auto_OnReading(AutoReading *r)
         }
         g_autoNoReading = !r->hasValue;
         if (r->hasValue) {
+            g_autoRawLux = r->lux;
             g_autoLux = Ambient_Smooth(&g_autoFilter, r->lux);
             Auto_Apply(FALSE);
         }
@@ -1210,6 +1214,7 @@ static void Auto_Configure(void)
     g_autoBusy = FALSE;   /* a worker still running reports with the old generation */
     g_autoFailures = 0;
     g_autoLux = -1;
+    g_autoRawLux = -1;
     g_autoNoReading = FALSE;
     memset(&g_autoFilter, 0, sizeof(g_autoFilter));
     Ambient_GateReset(&g_autoGate);

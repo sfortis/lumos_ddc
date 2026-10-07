@@ -28,7 +28,7 @@ int main(void)
     AmbientCurve empty = { .count = 0 };
     CHECK(Ambient_LevelFor(&empty, 10) == 40, "empty curve uses the default");
 
-    /* Interpolation is over log(lux + 1): 5 lx is past the middle of 0..10 */
+    /* Interpolation is over log(lux + 10): 5 lx is past the middle of 0..10 */
     int five = Ambient_LevelFor(&c, 5);
     CHECK(five > 30 && five < 40, "log interpolation at 5 lx");
 
@@ -102,13 +102,25 @@ int main(void)
     CHECK(s == 0, "first reading taken as is");
     AmbientFilter lamp = { 0 };
     Ambient_Smooth(&lamp, 8);
-    s = Ambient_Smooth(&lamp, 300);
-    CHECK(s > 150 && s < 300, "a lamp switched on is followed within one reading");
-    for (int i = 0; i < 60; i++) s = Ambient_Smooth(&lamp, 300);
-    CHECK(s > 280, "and settles on the new light");
+    s = Ambient_Smooth(&lamp, 77);
+    CHECK(s < 10, "one large reading is held");
+    s = Ambient_Smooth(&lamp, 77);
+    CHECK(s > 70 && s < 80, "a second one confirms it: the 8 to 77 lx lamp is followed after 30 s");
+    for (int i = 0; i < 60; i++) s = Ambient_Smooth(&lamp, 77);
+    CHECK(s > 75 && s < 79, "and stays there");
+    AmbientFilter spike = { 0 };
+    Ambient_Smooth(&spike, 8);
+    Ambient_Smooth(&spike, 300);
+    s = Ambient_Smooth(&spike, 8);
+    CHECK(s < 10, "a single spike is ignored");
+    AmbientFilter flip = { 0 };
+    Ambient_Smooth(&flip, 8);
+    Ambient_Smooth(&flip, 300);
+    s = Ambient_Smooth(&flip, 0.5);
+    CHECK(s < 10, "an opposite second reading does not confirm the first");
 
     /* The noisy FP2: random 0 or 5 lx for 16 hours of 30 s polls changes the
-       level about every half hour at most, against every 5 minutes before. */
+       level rarely (about 12 times in the simulation). */
     Ambient_DefaultCurve(&c);
     AmbientFilter noisy = { 0 };
     AmbientGate gate;
@@ -122,7 +134,7 @@ int main(void)
             changes++;
     }
     snprintf(msg, sizeof msg, "noisy sensor changed the level %d times in 16 h", changes);
-    CHECK(changes <= 40, msg);
+    CHECK(changes <= 20, msg);
 
     /* Gate */
     AmbientGate g2;

@@ -10,7 +10,7 @@ static const AmbientPoint kDefaultPoints[] = {
 
 static double LogLux(double lux)
 {
-    return log10((lux < 0 ? 0 : lux) + 1.0);
+    return log10((lux < 0 ? 0 : lux) + AMBIENT_LUX_OFFSET);
 }
 
 static int ClampLevel(int v)
@@ -149,11 +149,23 @@ double Ambient_Smooth(AmbientFilter *f, double lux)
     if (!f->primed) {
         f->primed = 1;
         f->logLux = x;
+        f->pending = 0;
     } else {
         double d = x - f->logLux;
-        f->logLux += (fabs(d) >= AMBIENT_JUMP ? AMBIENT_FAST : AMBIENT_SLOW) * d;
+        if (fabs(d) < AMBIENT_STEP) {
+            f->pending = 0;
+            f->logLux += AMBIENT_SLOW * d;
+        } else if (f->pending && (f->pendingLog - f->logLux) * d > 0 &&
+                   fabs(x - f->pendingLog) < AMBIENT_STEP / 2) {
+            f->logLux = (x + f->pendingLog) / 2;   /* confirmed: follow at once */
+            f->pending = 0;
+        } else {
+            f->pending = 1;                         /* hold until the next reading */
+            f->pendingLog = x;
+        }
     }
-    return pow(10.0, f->logLux) - 1.0;
+    double smoothed = pow(10.0, f->logLux) - AMBIENT_LUX_OFFSET;
+    return smoothed < 0 ? 0 : smoothed;
 }
 
 void Ambient_GateReset(AmbientGate *g)
