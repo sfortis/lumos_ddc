@@ -17,6 +17,7 @@ typedef struct {
     int   id;
     WCHAR label[80];
     BOOL  checked;
+    BOOL  disabled;   /* drawn grey, cannot be chosen; screen readers hear "unavailable" */
 } CtxMenuItem;
 
 /* Ten presets (MAX_PRESETS) plus every other item, header and separator. */
@@ -44,6 +45,13 @@ static void CtxAdd(CtxMenuData *d, int type, int id, const WCHAR *label, BOOL ch
     it->id = id;
     lstrcpynW(it->label, label ? label : L"", 80);
     it->checked = checked;
+    it->disabled = FALSE;
+}
+
+/* Selectable: the mouse, the keyboard and Enter reach it. */
+static BOOL CtxSelectable(const CtxMenuItem *it)
+{
+    return it->type == CTX_ITEM_NORMAL && !it->disabled;
 }
 
 /* Groups as in Settings: a title, the items, and a line before the next group. */
@@ -66,8 +74,13 @@ static void BuildContextMenu(CtxMenuData *d, Settings *s)
     /* Only once a light sensor is chosen; before that the switch would do nothing. */
     if (s->haSensor[0])
         CtxAdd(d, CTX_ITEM_NORMAL, IDM_AUTO_TOGGLE, L"Auto Brightness (Light Sensor)", s->haAutoEnabled);
+    /* Under auto brightness the schedule only stands in while Home Assistant
+       is offline, so its items are greyed out, as in Settings. */
+    BOOL autoOn = s->haAutoEnabled && s->haSensor[0];
     CtxAdd(d, CTX_ITEM_NORMAL, IDM_SCHEDULE_TOGGLE, L"Brightness Schedule", s->scheduleEnabled);
+    if (d->count > 0) d->items[d->count - 1].disabled = autoOn;
     CtxAdd(d, CTX_ITEM_NORMAL, IDM_SCHEDULE_EDIT, L"Edit Schedule...", FALSE);
+    if (d->count > 0) d->items[d->count - 1].disabled = autoOn;
     wsprintfW(label, L"Dim When Idle (%d%%/%dm)", s->idleDimPercent, s->idleDimMinutes);
     CtxAdd(d, CTX_ITEM_NORMAL, IDM_IDLEDIM_TOGGLE, label, s->idleDimEnabled);
     CtxAdd(d, CTX_ITEM_SEPARATOR, 0, NULL, FALSE);
@@ -105,7 +118,7 @@ static int CtxMenuHitTest(CtxMenuData *d, int y)
     for (int i = 0; i < d->count; i++) {
         int ih = CtxItemHeight(&d->items[i]);
         if (y >= cy && y < cy + ih)
-            return (d->items[i].type == CTX_ITEM_NORMAL) ? i : -1;
+            return CtxSelectable(&d->items[i]) ? i : -1;
         cy += ih;
     }
     return -1;
@@ -182,7 +195,7 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
         /* Checkmark */
         if (it->checked) {
             SelectObject(dc, hFontCheck);
-            SetTextColor(dc, HexToColorRef(CLR_ACCENT));
+            SetTextColor(dc, HexToColorRef(it->disabled ? CLR_SUBTEXT : CLR_ACCENT));
             RECT rcCheck = { textX - 2, cy, textX + 14, cy + CTXMENU_ITEM_H };
             DrawTextW(dc, L"\x2713", 1, &rcCheck, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             textX += 18;
@@ -190,7 +203,7 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
 
         /* Label */
         SelectObject(dc, hFont);
-        SetTextColor(dc, HexToColorRef(CLR_TEXT));
+        SetTextColor(dc, HexToColorRef(it->disabled ? CLR_SUBTEXT : CLR_TEXT));
         RECT rcLabel = { textX, cy, w - 12, cy + CTXMENU_ITEM_H };
         DrawTextW(dc, it->label, -1, &rcLabel,   /* preset names may hold "&" */
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -269,6 +282,8 @@ static void CtxA11yDescribe(void *ctx, int index, A11yItem *out)
     out->state = STATE_SYSTEM_FOCUSABLE;
     if (d->items[item].checked)
         out->state |= STATE_SYSTEM_CHECKED;
+    if (d->items[item].disabled)
+        out->state = STATE_SYSTEM_UNAVAILABLE | (out->state & STATE_SYSTEM_CHECKED);
     CtxItemRect(d, item, &out->rect);
     wcsncpy(out->name, d->items[item].label, 159);
     wcscpy(out->action, L"Execute");
@@ -282,8 +297,9 @@ static int CtxA11yFocused(void *ctx)
 
 static BOOL CtxA11yInvoke(void *ctx, int index)
 {
-    int item = CtxItemFromModel((CtxMenuData *)ctx, index);
-    if (item < 0 || !g_ctxHwnd)
+    CtxMenuData *d = (CtxMenuData *)ctx;
+    int item = CtxItemFromModel(d, index);
+    if (item < 0 || !g_ctxHwnd || !CtxSelectable(&d->items[item]))
         return FALSE;
     PostMessageW(g_ctxHwnd, WM_CTX_INVOKE, (WPARAM)item, 0);
     return TRUE;
@@ -309,7 +325,7 @@ static int CtxStep(CtxMenuData *d, int from, int dir)
 {
     for (int n = 0; n < d->count; n++) {
         from = (from + dir + d->count) % d->count;
-        if (d->items[from].type == CTX_ITEM_NORMAL)
+        if (CtxSelectable(&d->items[from]))
             return from;
     }
     return -1;
@@ -317,7 +333,7 @@ static int CtxStep(CtxMenuData *d, int from, int dir)
 
 static void CtxInvoke(HWND hwnd, CtxMenuData *d, int item)
 {
-    if (item < 0 || item >= d->count || d->items[item].type != CTX_ITEM_NORMAL)
+    if (item < 0 || item >= d->count || !CtxSelectable(&d->items[item]))
         return;
     int id = d->items[item].id;
     HWND owner = d->hwndOwner;

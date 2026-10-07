@@ -30,7 +30,13 @@ typedef struct {
     int    unit;
     int    action;    /* SET_ACTION: a SET_ACT_* value */
     BOOL   divider;   /* SET_SECTION: a line above it, for every section but the first */
+    int    when;      /* SET_WHEN_*: when the row can be changed */
 } SetRow;
+
+/* A row that does nothing in some state is drawn grey and cannot be changed,
+   but keeps its place in the focus order so a screen reader still finds it
+   (as unavailable), the way a disabled Windows control is announced. */
+enum { SET_WHEN_ALWAYS = 0, SET_WHEN_NO_AUTO };
 
 /* Space above a section that has a divider; the line sits in the middle of it. */
 #define SET_DIVIDER_H 12
@@ -140,6 +146,8 @@ static void BuildSettingsRows(SetEditData *d)
 
     SetAddRow(d, SET_SECTION, L"SCHEDULE");
     SetAddToggle(d, L"Brightness schedule", &d->scheduleEnabled);
+    if (d->rowCount > 0)
+        d->rows[d->rowCount - 1].when = SET_WHEN_NO_AUTO;   /* auto brightness replaces it */
 
     SetAddRow(d, SET_SECTION, L"HOME ASSISTANT");
     SetAddAction(d, L"Light sensor", SET_ACT_HASS);
@@ -167,6 +175,20 @@ static void BuildSettingsRows(SetEditData *d)
                          0, 100, 5, SET_UNIT_PERCENT);
     }
 }
+
+/* Auto brightness is on in this window's working copy and has a sensor, so
+   the schedule only stands in while Home Assistant is offline. */
+static BOOL SetAutoOn(const SetEditData *d)
+{
+    return d->haAutoEnabled && d->settings->haSensor[0];
+}
+
+static BOOL SetRowEnabled(const SetEditData *d, const SetRow *r)
+{
+    return r->when != SET_WHEN_NO_AUTO || !SetAutoOn(d);
+}
+
+static const WCHAR kFallbackNote[] = L"Used if Home Assistant is offline";
 
 static int SetRowHeight(SetRow *r)
 {
@@ -273,6 +295,10 @@ static int SetHitTest(SetEditData *d, int x, int y, int *outHit)
         int rh = SetRowHeight(r);
         if (y >= top && y < top + rh) {
             if (r->kind == SET_SECTION) return -1;
+            if (!SetRowEnabled(d, r)) {
+                *outHit = SETHIT_ROW;   /* like a label: it moves the window */
+                return i;
+            }
             if (r->kind == SET_ACTION) {
                 *outHit = SETHIT_ACTION;
                 return i;
@@ -400,12 +426,25 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
             DeleteObject(hb);
         }
 
+        BOOL enabled = SetRowEnabled(d, r);
         int labelRight = (r->kind == SET_HOTKEY) ? w - 184 : (r->kind == SET_ACTION) ? w - 196 : w - 124;
         RECT rcLabel = { 16, y, labelRight, y + SET_ROW_H };
         SelectObject(dc, hFont);
-        SetTextColor(dc, HexToColorRef(CLR_TEXT));
-        DrawTextW(dc, r->label, -1, &rcLabel,   /* monitor and preset names may hold "&" */
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(dc, HexToColorRef(enabled ? CLR_TEXT : CLR_SUBTEXT));
+        if (!enabled) {
+            /* The label moves up and the reason goes under it, in the row's own height. */
+            rcLabel.bottom = y + SET_ROW_H / 2 + 3;
+            DrawTextW(dc, r->label, -1, &rcLabel,
+                      DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            RECT rcNote = { 16, y + SET_ROW_H / 2 + 2, labelRight, y + SET_ROW_H };
+            SelectObject(dc, hFontSmall);
+            SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
+            DrawTextW(dc, kFallbackNote, -1, &rcNote,
+                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        } else {
+            DrawTextW(dc, r->label, -1, &rcLabel,   /* monitor and preset names may hold "&" */
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
 
         if (r->kind == SET_ACTION) {
             WCHAR val[200];
@@ -423,8 +462,9 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
             RECT rcT;
             SetToggleRect(y, &rcT);
             BOOL on = (r->bval && *r->bval);
-            HBRUSH track = CreateSolidBrush(HexToColorRef(on ? CLR_ACCENT : CLR_TRACK));
-            HBRUSH knob  = CreateSolidBrush(HexToColorRef(on ? CLR_BG : CLR_SUBTEXT));
+            /* Disabled: the position still shows the setting, in grey. */
+            HBRUSH track = CreateSolidBrush(HexToColorRef(on && enabled ? CLR_ACCENT : CLR_TRACK));
+            HBRUSH knob  = CreateSolidBrush(HexToColorRef(!enabled ? CLR_SURFACE : on ? CLR_BG : CLR_SUBTEXT));
             HBRUSH ob = (HBRUSH)SelectObject(dc, track);
             RoundRect(dc, rcT.left, rcT.top, rcT.right, rcT.bottom, 20, 20);
             SelectObject(dc, knob);
@@ -579,8 +619,14 @@ static void SetA11yDescribe(void *ctx, int index, A11yItem *out)
         out->role = ROLE_SYSTEM_CHECKBUTTON;
         if (r->bval && *r->bval)
             out->state |= STATE_SYSTEM_CHECKED;
-        wcsncpy(out->name, r->label, 159);
-        wcscpy(out->action, L"Toggle");
+        if (SetRowEnabled(d, r)) {
+            wcsncpy(out->name, r->label, 159);
+            wcscpy(out->action, L"Toggle");
+        } else {
+            out->state |= STATE_SYSTEM_UNAVAILABLE;
+            _snwprintf(out->name, 159, L"%s, %s", r->label, kFallbackNote);
+            out->name[159] = L'\0';
+        }
         break;
     case SET_ACTION: {
         WCHAR val[200];
@@ -637,6 +683,8 @@ static BOOL SetA11yInvoke(void *ctx, int index)
         return FALSE;
     if (row < d->rowCount && d->rows[row].kind == SET_NUMBER)
         return FALSE;   /* a number has no default action, only a value */
+    if (row < d->rowCount && !SetRowEnabled(d, &d->rows[row]))
+        return FALSE;   /* greyed out: report the refusal instead of a silent no-op */
     PostMessageW(g_setHwnd, WM_SET_ACTIVATE, (WPARAM)row, 0);
     return TRUE;
 }
@@ -680,6 +728,15 @@ static void SetRowChanged(HWND hwnd, SetEditData *d, int row)
     if (r->kind == SET_TOGGLE)       A11y_NotifyState(hwnd, index);
     else if (r->kind == SET_NUMBER)  A11y_NotifyValue(hwnd, index);
     else                             A11y_NotifyName(hwnd, index);
+}
+
+/* Auto brightness flipped: the rows that depend on it changed their state,
+   which a screen reader hears only if told. */
+static void SetDependentsChanged(HWND hwnd, SetEditData *d)
+{
+    for (int i = 0; i < d->rowCount; i++)
+        if (d->rows[i].when == SET_WHEN_NO_AUTO)
+            A11y_NotifyState(hwnd, SetModelFromRow(d, i));
 }
 
 static void SetBeginCapture(HWND hwnd, SetEditData *d, int row)
@@ -863,9 +920,13 @@ static void SetActivate(HWND hwnd, SetEditData *d, int row)
         return;
     }
     SetRow *r = &d->rows[row];
+    if (!SetRowEnabled(d, r))
+        return;
     if (r->kind == SET_TOGGLE && r->bval) {
         *r->bval = !*r->bval;
         SetRowChanged(hwnd, d, row);
+        if (r->bval == &d->haAutoEnabled)
+            SetDependentsChanged(hwnd, d);
     } else if (r->kind == SET_HOTKEY) {
         SetBeginCapture(hwnd, d, row);
     } else if (r->kind == SET_ACTION) {
@@ -910,9 +971,12 @@ static void SetKeyDown(HWND hwnd, SetEditData *d, WPARAM vk)
         if (r && r->kind == SET_NUMBER) {
             SetAdjust(r, dir);
             SetRowChanged(hwnd, d, row);
-        } else if (r && r->kind == SET_TOGGLE && r->bval && *r->bval != (dir > 0)) {
+        } else if (r && r->kind == SET_TOGGLE && r->bval && *r->bval != (dir > 0) &&
+                   SetRowEnabled(d, r)) {
             *r->bval = (dir > 0);
             SetRowChanged(hwnd, d, row);
+            if (r->bval == &d->haAutoEnabled)
+                SetDependentsChanged(hwnd, d);
         }
         return;
     }
@@ -1018,6 +1082,8 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (hit == SETHIT_TOGGLE && r->bval) {
                 *r->bval = !*r->bval;
                 SetRowChanged(hwnd, d, row);
+                if (r->bval == &d->haAutoEnabled)
+                    SetDependentsChanged(hwnd, d);
             } else if (hit == SETHIT_MINUS || hit == SETHIT_PLUS) {
                 SetAdjust(r, hit == SETHIT_PLUS ? 1 : -1);
                 SetRowChanged(hwnd, d, row);
@@ -1041,6 +1107,8 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     case WM_MOUSEMOVE: {
         int hit;
         int row = SetHitTest(d, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &hit);
+        if (row >= 0 && !SetRowEnabled(d, &d->rows[row]))
+            row = -1;   /* a greyed-out row does not light up */
         if (row != d->hoverRow) {
             d->hoverRow = row;
             RenderSettings(hwnd, d);
@@ -1077,6 +1145,7 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             g_setHwnd = NULL;
         } else {
             RenderSettings(hwnd, d);   /* the sensor may have changed in the HA window */
+            SetDependentsChanged(hwnd, d);   /* and with it whether the schedule is greyed out */
         }
         return 0;
 
