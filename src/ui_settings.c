@@ -150,7 +150,7 @@ static void BuildSettingsRows(SetEditData *d)
         d->rows[d->rowCount - 1].when = SET_WHEN_NO_AUTO;   /* auto brightness replaces it */
 
     SetAddRow(d, SET_SECTION, L"HOME ASSISTANT");
-    SetAddAction(d, L"Light sensor", SET_ACT_HASS);
+    SetAddAction(d, L"Configure", SET_ACT_HASS);
     SetAddToggle(d, L"Auto brightness", &d->haAutoEnabled);
     SetAddAction(d, L"Learned curve", SET_ACT_RESET_CURVE);
 

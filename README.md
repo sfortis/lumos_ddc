@@ -145,7 +145,7 @@ If you run [Home Assistant](https://www.home-assistant.io/) and have an illumina
 ### Setting it up
 
 1. In Home Assistant, create a long-lived access token (your profile, Security tab). A non-admin user is enough, and a dedicated user for Lumos is a good idea.
-2. Open Settings in Lumos and click **Light sensor** in the HOME ASSISTANT section. The Home Assistant window opens.
+2. Open Settings in Lumos and click **Configure** in the HOME ASSISTANT section. The Home Assistant window opens.
 3. Enter the address of your server and paste the token, then press **Connect**. On a home network the address is usually `http://192.168.1.10:8123` (with the IP address of your server) or `http://homeassistant.local:8123`. When you leave out `http://`, Lumos adds it.
 4. Lumos lists every sensor whose device class is illuminance, with its area and its current reading. Choose the sensor in the room of this PC and press **Save**.
 5. Turn on **Auto brightness** in Settings, or choose **Auto Brightness (Light Sensor)** in the tray menu. That menu item appears once a sensor is chosen.
@@ -186,7 +186,7 @@ To reach the tray icon, press `Win+B` and move to the Lumos icon with the arrow 
 |---|---|
 | Popup | `Tab` / `Shift+Tab` move between the sliders and the monitor maximums. The arrow keys change the value by 1 (`Up` and `Right` raise it), `Page Up` / `Page Down` change a slider by 10 and a maximum by 5, and `Home` / `End` jump to the limits. `Esc` closes. |
 | Menu | `Up` / `Down` move, `Home` / `End` jump to the first or last item, a letter jumps to the next item that starts with it, `Enter` or `Space` chooses, and `Esc` closes. |
-| Settings | `Tab`, `Shift+Tab`, `Up` and `Down` move between rows and the buttons. `Left` / `Right` change a number or flip a switch, and `Space` flips a switch. `Enter` on a hotkey row starts recording a new combination, on the Light sensor or Learned curve row it does what a click does, and anywhere else it saves. `Esc` closes without saving. |
+| Settings | `Tab`, `Shift+Tab`, `Up` and `Down` move between rows and the buttons. `Left` / `Right` change a number or flip a switch, and `Space` flips a switch. `Enter` on a hotkey row starts recording a new combination, on the Configure or Learned curve row it does what a click does, and anywhere else it saves. `Esc` closes without saving. |
 | Home Assistant | The window is built from standard Windows text fields, buttons and a list. `Tab` and `Shift+Tab` move between them, the arrow keys choose a sensor in the list, and `Esc` closes without saving. |
 | About | `Enter` opens the project page and `Esc` closes. |
 
