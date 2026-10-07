@@ -143,7 +143,7 @@ To match two monitors, set All Monitors to 100% and change the maximum of the br
 
 ## Auto brightness with Home Assistant
 
-If you run [Home Assistant](https://www.home-assistant.io/) and have an illuminance sensor in the room, Lumos can follow the light in that room. It reads the sensor every 30 seconds and sets the All Monitors level from it, so the screens get brighter when the room does and dimmer when it gets dark. The feature is off until you set it up.
+If you run [Home Assistant](https://www.home-assistant.io/) and have an illuminance sensor in the room, Lumos can follow the light in that room. It reads the sensor every 15 seconds and sets the All Monitors level from it, so the screens get brighter when the room does and dimmer when it gets dark. The feature is off until you set it up.
 
 ### Setting it up
 
@@ -161,7 +161,7 @@ A curve turns the light into a brightness level. Until it learns anything, the c
 
 When you change the brightness yourself while auto brightness is on (a hotkey, the mouse wheel, a slider, a preset or `lumosctl`), Lumos keeps your level and adds it to the curve as the level you want at the current light. The first learned point is added to the four default points, and the curve holds at most eight points in total. A new point replaces one at a similar light level, and points that would make the screens darker as the room gets brighter are removed. To start over, click **Learned curve** in Settings and press Save.
 
-Many indoor sensors report small random changes in a dark room, for example 0, 5 and 8 lx. Lumos smooths the readings so the screens do not change every few minutes because of that noise. A large change, such as a lamp switched on, is applied once a second reading 10 seconds later confirms it, so the screens follow it within about half a minute.
+Many indoor sensors report small random changes in a dark room, for example 0, 5 and 8 lx. Lumos smooths the readings so the screens do not change every few minutes because of that noise. A clear change, such as a lamp switched on, is applied once a second reading 3 seconds later confirms it, so the screens follow it within about 5 to 20 seconds. The level then moves 1% every 100 milliseconds instead of jumping, so the screens fade to the new level (from 85% to 40% takes about 4.5 seconds). A change you make yourself, and the restore after a wake, are applied at once.
 
 ### The popup panel
 
@@ -169,7 +169,7 @@ Once a sensor is chosen, the popup shows a panel under the sliders with the area
 
 ### When Home Assistant does not answer
 
-The brightness schedule is paused while auto brightness controls the level. When Home Assistant does not answer three polls in a row (about a minute and a half), the panel says "Home Assistant offline" and the schedule takes over until Home Assistant answers again. A sensor that reports "unavailable" keeps the level of its last reading.
+The brightness schedule is paused while auto brightness controls the level. While auto brightness is on, the schedule switch in Settings and the two schedule items in the tray menu are greyed out, and Settings says that the schedule is used if Home Assistant is offline. When Home Assistant does not answer six polls in a row (a minute and a half), the panel says "Home Assistant offline" and the schedule takes over until Home Assistant answers again. A sensor that reports "unavailable" keeps the level of its last reading.
 
 ### The token
 
