@@ -8,6 +8,9 @@ static HWND g_ctxHwnd = NULL;
 
 #define CTX_ITEM_NORMAL    0
 #define CTX_ITEM_SEPARATOR 1
+#define CTX_ITEM_HEADER    2   /* a group title, like the Settings sections; not selectable */
+
+#define CTXMENU_HEADER_H   24
 
 typedef struct {
     int   type;
@@ -16,7 +19,8 @@ typedef struct {
     BOOL  checked;
 } CtxMenuItem;
 
-#define MAX_CTX_ITEMS 20
+/* Ten presets (MAX_PRESETS) plus every other item, header and separator. */
+#define MAX_CTX_ITEMS 32
 
 typedef struct {
     CtxMenuItem items[MAX_CTX_ITEMS];
@@ -31,118 +35,59 @@ static CtxMenuData g_ctxData;
    call) closes the menu after the call has returned. wParam = item index. */
 #define WM_CTX_INVOKE (WM_APP + 1)
 
+static void CtxAdd(CtxMenuData *d, int type, int id, const WCHAR *label, BOOL checked)
+{
+    if (d->count >= MAX_CTX_ITEMS)
+        return;
+    CtxMenuItem *it = &d->items[d->count++];
+    it->type = type;
+    it->id = id;
+    lstrcpynW(it->label, label ? label : L"", 80);
+    it->checked = checked;
+}
+
+/* Groups as in Settings: a title, the items, and a line before the next group. */
 static void BuildContextMenu(CtxMenuData *d, Settings *s)
 {
     d->count = 0;
     d->hoverIndex = -1;
+    WCHAR label[80];
 
-    /* Presets as flat items */
-    for (int i = 0; i < s->presetCount && d->count < MAX_CTX_ITEMS; i++) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_PRESET_BASE + i;
-        wsprintfW(it->label, L"%s (%u%%)", s->presets[i].name, s->presets[i].brightness);
-        it->checked = FALSE;
+    if (s->presetCount > 0) {
+        CtxAdd(d, CTX_ITEM_HEADER, 0, L"PRESETS", FALSE);
+        for (int i = 0; i < s->presetCount; i++) {
+            wsprintfW(label, L"%s (%u%%)", s->presets[i].name, s->presets[i].brightness);
+            CtxAdd(d, CTX_ITEM_NORMAL, IDM_PRESET_BASE + i, label, FALSE);
+        }
+        CtxAdd(d, CTX_ITEM_SEPARATOR, 0, NULL, FALSE);
     }
 
-    /* Separator */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_SEPARATOR;
-        it->id = 0;
-        it->label[0] = 0;
-        it->checked = FALSE;
-    }
-
-    /* Re-scan */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_RESCAN;
-        wcscpy(it->label, L"Re-scan Monitors");
-        it->checked = FALSE;
-    }
-
-    /* Settings */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_SETTINGS;
-        wcscpy(it->label, L"Settings...");
-        it->checked = FALSE;
-    }
-
-    /* Autostart */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_AUTOSTART;
-        wcscpy(it->label, L"Start with Windows");
-        it->checked = Settings_GetAutostart();
-    }
-
-    /* Schedule toggle */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_SCHEDULE_TOGGLE;
-        wcscpy(it->label, L"Brightness Schedule");
-        it->checked = s->scheduleEnabled;
-    }
-
-    /* Edit schedule */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_SCHEDULE_EDIT;
-        wcscpy(it->label, L"Edit Schedule...");
-        it->checked = FALSE;
-    }
-
-    /* Idle auto-dim toggle. The level and the timeout live in config.ini. */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_IDLEDIM_TOGGLE;
-        wsprintfW(it->label, L"Dim When Idle (%d%%/%dm)",
-                  s->idleDimPercent, s->idleDimMinutes);
-        it->checked = s->idleDimEnabled;
-    }
-
+    CtxAdd(d, CTX_ITEM_HEADER, 0, L"AUTOMATIC", FALSE);
     /* Only once a light sensor is chosen; before that the switch would do nothing. */
-    if (s->haSensor[0] && d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_AUTO_TOGGLE;
-        wcscpy(it->label, L"Auto Brightness (Light Sensor)");
-        it->checked = s->haAutoEnabled;
-    }
+    if (s->haSensor[0])
+        CtxAdd(d, CTX_ITEM_NORMAL, IDM_AUTO_TOGGLE, L"Auto Brightness (Light Sensor)", s->haAutoEnabled);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_SCHEDULE_TOGGLE, L"Brightness Schedule", s->scheduleEnabled);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_SCHEDULE_EDIT, L"Edit Schedule...", FALSE);
+    wsprintfW(label, L"Dim When Idle (%d%%/%dm)", s->idleDimPercent, s->idleDimMinutes);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_IDLEDIM_TOGGLE, label, s->idleDimEnabled);
+    CtxAdd(d, CTX_ITEM_SEPARATOR, 0, NULL, FALSE);
 
-    /* Separator */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_SEPARATOR;
-        it->id = 0;
-        it->label[0] = 0;
-        it->checked = FALSE;
-    }
+    CtxAdd(d, CTX_ITEM_HEADER, 0, L"APP", FALSE);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_RESCAN, L"Re-scan Monitors", FALSE);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_SETTINGS, L"Settings...", FALSE);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_AUTOSTART, L"Start with Windows", Settings_GetAutostart());
+    CtxAdd(d, CTX_ITEM_SEPARATOR, 0, NULL, FALSE);
 
-    /* About */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_ABOUT;
-        wcscpy(it->label, L"About " APP_NAME);
-        it->checked = FALSE;
-    }
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_ABOUT, L"About " APP_NAME, FALSE);
+    CtxAdd(d, CTX_ITEM_NORMAL, IDM_EXIT, L"Exit", FALSE);
+}
 
-    /* Exit */
-    if (d->count < MAX_CTX_ITEMS) {
-        CtxMenuItem *it = &d->items[d->count++];
-        it->type = CTX_ITEM_NORMAL;
-        it->id = IDM_EXIT;
-        wcscpy(it->label, L"Exit");
-        it->checked = FALSE;
+static int CtxItemHeight(const CtxMenuItem *it)
+{
+    switch (it->type) {
+    case CTX_ITEM_SEPARATOR: return CTXMENU_SEP_H;
+    case CTX_ITEM_HEADER:    return CTXMENU_HEADER_H;
+    default:                 return CTXMENU_ITEM_H;
     }
 }
 
@@ -150,7 +95,7 @@ static int GetCtxMenuHeight(CtxMenuData *d)
 {
     int h = CTXMENU_PAD * 2;
     for (int i = 0; i < d->count; i++)
-        h += (d->items[i].type == CTX_ITEM_SEPARATOR) ? CTXMENU_SEP_H : CTXMENU_ITEM_H;
+        h += CtxItemHeight(&d->items[i]);
     return h;
 }
 
@@ -158,10 +103,9 @@ static int CtxMenuHitTest(CtxMenuData *d, int y)
 {
     int cy = CTXMENU_PAD;
     for (int i = 0; i < d->count; i++) {
-        int ih = (d->items[i].type == CTX_ITEM_SEPARATOR) ? CTXMENU_SEP_H : CTXMENU_ITEM_H;
-        if (y >= cy && y < cy + ih) {
-            return (d->items[i].type == CTX_ITEM_SEPARATOR) ? -1 : i;
-        }
+        int ih = CtxItemHeight(&d->items[i]);
+        if (y >= cy && y < cy + ih)
+            return (d->items[i].type == CTX_ITEM_NORMAL) ? i : -1;
         cy += ih;
     }
     return -1;
@@ -189,6 +133,9 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
     HFONT hFontCheck = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT hFontHeader = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT oldFont = (HFONT)SelectObject(dc, hFont);
 
     int cy = CTXMENU_PAD;
@@ -203,6 +150,17 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
             FillRect(dc, &rcSep, sepBrush);
             DeleteObject(sepBrush);
             cy += CTXMENU_SEP_H;
+            continue;
+        }
+
+        if (it->type == CTX_ITEM_HEADER) {
+            /* Drawn like a Settings section title, a few pixels above the
+               bottom so it sits with the items under it. */
+            SelectObject(dc, hFontHeader);
+            SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
+            RECT rcHead = { 14, cy, w - 12, cy + CTXMENU_HEADER_H - 2 };
+            DrawTextW(dc, it->label, -1, &rcHead, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+            cy += CTXMENU_HEADER_H;
             continue;
         }
 
@@ -243,6 +201,7 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
     SelectObject(dc, oldFont);
     DeleteObject(hFont);
     DeleteObject(hFontCheck);
+    DeleteObject(hFontHeader);
 
     ApplyRoundedMask(bits, w, h, CTXMENU_CORNER, 245);
     CommitLayered(hwnd, dc, w, h);
@@ -252,8 +211,9 @@ static void RenderContextMenu(HWND hwnd, CtxMenuData *d)
 }
 
 /* ---- Keyboard and screen reader ----
-   Separators are drawing only: screen readers see the selectable items, which
-   is why the model index and the item index are told apart below. */
+   Separators and group titles are drawing only: screen readers see the
+   selectable items, which is why the model index and the item index are told
+   apart below. */
 
 static int CtxSelectableCount(CtxMenuData *d)
 {
@@ -285,7 +245,7 @@ static void CtxItemRect(CtxMenuData *d, int item, RECT *rc)
 {
     int cy = CTXMENU_PAD;
     for (int i = 0; i < item; i++)
-        cy += (d->items[i].type == CTX_ITEM_SEPARATOR) ? CTXMENU_SEP_H : CTXMENU_ITEM_H;
+        cy += CtxItemHeight(&d->items[i]);
     SetRect(rc, 4, cy, CTXMENU_WIDTH - 4, cy + CTXMENU_ITEM_H);
 }
 
