@@ -29,7 +29,11 @@ typedef struct {
     int    step;      /* SET_NUMBER increment (minutes scale instead, see SetStepFor) */
     int    unit;
     int    action;    /* SET_ACTION: a SET_ACT_* value */
+    BOOL   divider;   /* SET_SECTION: a line above it, for every section but the first */
 } SetRow;
+
+/* Space above a section that has a divider; the line sits in the middle of it. */
+#define SET_DIVIDER_H 12
 
 #define MAX_SET_ROWS (MAX_PRESETS + MAX_MONITORS + 16)
 
@@ -81,6 +85,7 @@ static SetRow *SetAddRow(SetEditData *d, int kind, const WCHAR *label)
     SetRow *r = &d->rows[d->rowCount++];
     memset(r, 0, sizeof(*r));
     r->kind = kind;
+    r->divider = (kind == SET_SECTION && d->rowCount > 1);
     wcsncpy(r->label, label, (sizeof(r->label) / sizeof(WCHAR)) - 1);
     return r;
 }
@@ -165,7 +170,9 @@ static void BuildSettingsRows(SetEditData *d)
 
 static int SetRowHeight(SetRow *r)
 {
-    return (r->kind == SET_SECTION) ? SET_SECTION_H : SET_ROW_H;
+    if (r->kind == SET_SECTION)
+        return SET_SECTION_H + (r->divider ? SET_DIVIDER_H : 0);
+    return SET_ROW_H;
 }
 
 static int SetHeight(SetEditData *d)
@@ -369,6 +376,14 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
         SetRow *r = &d->rows[i];
 
         if (r->kind == SET_SECTION) {
+            if (r->divider) {
+                /* The same line as the separators of the context menu. */
+                HBRUSH sep = CreateSolidBrush(HexToColorRef(CLR_TRACK));
+                RECT rcSep = { 16, y + SET_DIVIDER_H / 2, w - 16, y + SET_DIVIDER_H / 2 + 1 };
+                FillRect(dc, &rcSep, sep);
+                DeleteObject(sep);
+                y += SET_DIVIDER_H;
+            }
             RECT rc = { 16, y, w - 16, y + SET_SECTION_H };
             SelectObject(dc, hFontSmall);
             SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
