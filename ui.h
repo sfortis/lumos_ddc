@@ -49,6 +49,29 @@ BOOL UI_IsPopupVisible(HWND hwnd);
 /* Refresh popup visuals (call after brightness changes) */
 void UI_RefreshPopup(HWND hwnd, MonitorList *ml);
 
+/* Auto brightness panel at the bottom of the popup. lumos.c publishes the
+   state; the popup only draws it. */
+typedef enum {
+    AUTO_INFO_HIDDEN = 0,   /* no light sensor chosen: no panel */
+    AUTO_INFO_OFF,          /* a sensor is chosen, auto brightness is off */
+    AUTO_INFO_CONNECTING,   /* on, no reading yet */
+    AUTO_INFO_ACTIVE,       /* on, following the sensor */
+    AUTO_INFO_NO_READING,   /* on, the sensor reports "unavailable" */
+    AUTO_INFO_OFFLINE       /* on, Home Assistant does not answer: the schedule rules */
+} AutoInfoState;
+
+typedef struct {
+    AutoInfoState state;
+    WCHAR        place[64];   /* the sensor's area, or its name when it has none */
+    double       lux;         /* smoothed reading, valid when hasLux */
+    BOOL         hasLux;
+    int          level;       /* All Monitors level now, -1 when unknown */
+    AmbientCurve curve;       /* a copy; count 0 means the default curve */
+} AutoInfo;
+
+/* Store the panel state and redraw the popup if it is open. */
+void UI_SetAutoInfo(HWND hwndPopup, const AutoInfo *info);
+
 /* Show brief OSD overlay on a monitor. announce also speaks the level to a
    screen reader; pass FALSE while the popup is open, since its focused slider
    already reports the change. */

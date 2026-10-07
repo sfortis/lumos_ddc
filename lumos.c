@@ -1049,6 +1049,7 @@ static AmbientGate   g_autoGate;
 static double        g_autoLux = -1;    /* smoothed lux, -1 until the first reading */
 static int           g_autoFailures;    /* failed polls in a row */
 static BOOL          g_autoOnline;      /* Home Assistant answered recently */
+static BOOL          g_autoNoReading;   /* the last answer was "unavailable" or "unknown" */
 static BOOL          g_autoWasEnabled;  /* haAutoEnabled when Auto_Configure last ran */
 static int           g_autoCurvePoints; /* learned points then, to notice a reset */
 
@@ -1062,6 +1063,39 @@ static BOOL Auto_Configured(void)
 static BOOL Auto_Owns(void)
 {
     return Auto_Configured() && g_autoOnline;
+}
+
+/* Tell the popup what auto brightness is doing, for its status panel. */
+static void Auto_PublishInfo(void)
+{
+    const Settings *s = &g_settings;
+    AutoInfo info;
+    memset(&info, 0, sizeof(info));
+    info.level = g_masterTarget;
+    info.curve = s->haCurve;
+    /* The label is "Area: Name"; the area alone is enough in the popup. */
+    const WCHAR *label = s->haSensorLabel[0] ? s->haSensorLabel : s->haSensor;
+    const WCHAR *colon = wcsstr(label, L": ");
+    int n = colon ? (int)(colon - label) : (int)wcslen(label);
+    if (n > 63) n = 63;
+    wcsncpy(info.place, label, (size_t)n);
+    info.place[n] = L'\0';
+
+    if (!s->haSensor[0])
+        info.state = AUTO_INFO_HIDDEN;
+    else if (!s->haAutoEnabled)
+        info.state = AUTO_INFO_OFF;
+    else if (!Auto_Configured() || !g_autoOnline)
+        info.state = AUTO_INFO_OFFLINE;
+    else if (g_autoNoReading)
+        info.state = AUTO_INFO_NO_READING;
+    else if (g_autoLux < 0)
+        info.state = AUTO_INFO_CONNECTING;
+    else
+        info.state = AUTO_INFO_ACTIVE;
+    info.hasLux = (g_autoLux >= 0);
+    info.lux = g_autoLux;
+    UI_SetAutoInfo(g_hwndPopup, &info);
 }
 
 static DWORD WINAPI AutoThread(LPVOID param)
@@ -1116,6 +1150,7 @@ static void Auto_Apply(BOOL force)
     g_masterTarget = target;
     TIMED("auto: SetAllBrightness", Monitor_SetAllBrightness(&g_monitors, target));
     UI_RefreshPopup(g_hwndPopup, &g_monitors);
+    Auto_PublishInfo();
 }
 
 static void Auto_OnReading(AutoReading *r)
@@ -1133,6 +1168,7 @@ static void Auto_OnReading(AutoReading *r)
             g_autoOnline = TRUE;
             Ambient_GateReset(&g_autoGate);
         }
+        g_autoNoReading = !r->hasValue;
         if (r->hasValue) {
             g_autoLux = Ambient_Smooth(&g_autoFilter, r->lux);
             Auto_Apply(FALSE);
@@ -1146,6 +1182,7 @@ static void Auto_OnReading(AutoReading *r)
         Schedule_ApplyNow();
     }
     free(r);
+    Auto_PublishInfo();
 }
 
 /* A manual change while auto brightness owns the level: remember it as the
@@ -1161,6 +1198,7 @@ static void Auto_Learn(void)
     Ambient_Decide(&g_autoGate, g_masterTarget);
     g_autoCurvePoints = g_settings.haCurve.count;
     SetTimer(g_hwndHidden, AUTO_SAVE_TIMER_ID, AUTO_SAVE_DELAY_MS, NULL);
+    Auto_PublishInfo();
 }
 
 /* Start, restart or stop polling after the settings changed. */
@@ -1172,6 +1210,7 @@ static void Auto_Configure(void)
     g_autoBusy = FALSE;   /* a worker still running reports with the old generation */
     g_autoFailures = 0;
     g_autoLux = -1;
+    g_autoNoReading = FALSE;
     memset(&g_autoFilter, 0, sizeof(g_autoFilter));
     Ambient_GateReset(&g_autoGate);
     KillTimer(g_hwndHidden, AUTO_TIMER_ID);
@@ -1186,6 +1225,7 @@ static void Auto_Configure(void)
         g_scheduleLastApplied = -1;   /* auto brightness off: the schedule resumes */
         Schedule_ApplyNow();
     }
+    Auto_PublishInfo();
 }
 
 static void SetAutoEnabled(BOOL on)
@@ -1340,6 +1380,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             } else if (g_settings.haCurve.count != g_autoCurvePoints) {
                 g_autoCurvePoints = g_settings.haCurve.count;
                 Auto_Apply(TRUE);
+                Auto_PublishInfo();   /* the panel shows the curve even if the level stayed */
             }
             g_scheduleSuspended = FALSE;  /* a schedule toggle takes effect now */
             g_scheduleLastApplied = -1;

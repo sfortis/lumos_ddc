@@ -2,6 +2,7 @@
 #include "brightmap.h"
 #include <shellapi.h>
 #include <windowsx.h>
+#include <math.h>
 
 static const WCHAR POPUP_CLASS[]   = L"LumosPopup";
 
@@ -118,10 +119,193 @@ static int HitTestDelta(PopupData *pd, int x, int y, int *outRow)
 
 /* ---- Popup layout ---- */
 
+/* ---- Auto brightness panel ---- */
+
+static AutoInfo g_autoInfo;
+
+#define AUTO_LINE_H   30   /* separator and status line */
+#define AUTO_CHART_H  72   /* chart and its axis labels */
+
+static int AutoPanelHeight(void)
+{
+    if (g_autoInfo.state == AUTO_INFO_HIDDEN)
+        return 0;
+    return AUTO_LINE_H + (g_autoInfo.state == AUTO_INFO_OFF ? 0 : AUTO_CHART_H);
+}
+
 static int GetPopupHeight(PopupData *pd)
 {
     int rows = pd->ml->count + 1;
-    return POPUP_PADDING + 24 + (rows * POPUP_ROW_H) + POPUP_PADDING;
+    return POPUP_PADDING + 24 + (rows * POPUP_ROW_H) + AutoPanelHeight() + POPUP_PADDING;
+}
+
+static int AutoPanelTop(PopupData *pd)
+{
+    return POPUP_PADDING + 24 + (pd->ml->count + 1) * POPUP_ROW_H;
+}
+
+/* The status line in two parts: what (left) and the numbers (right). */
+static void AutoStatusText(WCHAR *left, WCHAR *right, int cch)
+{
+    const AutoInfo *a = &g_autoInfo;
+    right[0] = L'\0';
+    switch (a->state) {
+    case AUTO_INFO_OFF:
+        lstrcpynW(left, L"Auto brightness off", cch);
+        lstrcpynW(right, a->place, cch);
+        return;
+    case AUTO_INFO_OFFLINE:
+        lstrcpynW(left, L"Home Assistant offline", cch);
+        lstrcpynW(right, L"schedule active", cch);
+        return;
+    default:
+        break;
+    }
+    _snwprintf(left, cch - 1, L"Auto \x00B7 %s", a->place);
+    left[cch - 1] = L'\0';
+    if (a->state == AUTO_INFO_CONNECTING)
+        lstrcpynW(right, L"connecting...", cch);
+    else if (a->state == AUTO_INFO_NO_READING)
+        _snwprintf(right, cch - 1, a->level >= 0 ? L"no reading, %d%%" : L"no reading", a->level);
+    else if (a->hasLux && a->level >= 0)
+        _snwprintf(right, cch - 1, L"%.0f lx \x2192 %d%%", a->lux, a->level);
+    right[cch - 1] = L'\0';
+}
+
+/* The x axis runs over log10(lux + 1) from 0 to at least 1000 lx, further
+   when a learned point or the reading lies beyond. */
+static double AutoChartMaxLux(void)
+{
+    double maxLux = 1000;
+    for (int i = 0; i < g_autoInfo.curve.count; i++)
+        if (g_autoInfo.curve.points[i].lux > maxLux)
+            maxLux = g_autoInfo.curve.points[i].lux;
+    if (g_autoInfo.hasLux && g_autoInfo.lux > maxLux)
+        maxLux = g_autoInfo.lux;
+    double decade = 1000;
+    while (decade < maxLux)
+        decade *= 10;
+    return decade;
+}
+
+static void DrawAutoPanel(HDC dc, PopupData *pd, int w, HFONT font, HFONT fontSmall)
+{
+    if (g_autoInfo.state == AUTO_INFO_HIDDEN)
+        return;
+    int top = AutoPanelTop(pd);
+
+    HBRUSH sep = CreateSolidBrush(HexToColorRef(CLR_TRACK));
+    RECT rcSep = { POPUP_PADDING, top + 2, w - POPUP_PADDING, top + 3 };
+    FillRect(dc, &rcSep, sep);
+    DeleteObject(sep);
+
+    WCHAR left[96], right[64];
+    AutoStatusText(left, right, 64);
+    BOOL problem = (g_autoInfo.state == AUTO_INFO_OFFLINE);
+    RECT rcRight = { w - POPUP_PADDING - 120, top + 8, w - POPUP_PADDING - 4, top + 26 };
+    RECT rcLeft = { POPUP_PADDING + 4, top + 8, rcRight.left - 6, top + 26 };
+    SelectObject(dc, font);
+    SetTextColor(dc, HexToColorRef(problem ? CLR_ERROR : CLR_TEXT));
+    DrawTextW(dc, left, -1, &rcLeft, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, fontSmall);
+    SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
+    DrawTextW(dc, right, -1, &rcRight, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (g_autoInfo.state == AUTO_INFO_OFF)
+        return;
+
+    /* Chart: the curve, the learned points, and the reading now. */
+    int cl = POPUP_PADDING + 4, cr = w - POPUP_PADDING - 4;
+    int ct = top + AUTO_LINE_H + 4, cb = ct + 46;
+    double maxLog = log10(AutoChartMaxLux() + 1.0);
+    #define CHART_X(lux) (cl + (int)((cr - cl) * log10((lux) + 1.0) / maxLog + 0.5))
+    #define CHART_Y(lv)  (cb - (int)((cb - ct) * (lv) / 100.0 + 0.5))
+
+    HPEN grid = CreatePen(PS_SOLID, 1, HexToColorRef(CLR_TRACK));
+    HPEN oldPen = (HPEN)SelectObject(dc, grid);
+    MoveToEx(dc, cl, cb, NULL); LineTo(dc, cr, cb);
+    MoveToEx(dc, cl, ct, NULL); LineTo(dc, cr, ct);
+
+    HPEN line = CreatePen(PS_SOLID, 2, HexToColorRef(CLR_ACCENT));
+    SelectObject(dc, line);
+    POINT pts[64];
+    for (int i = 0; i < 64; i++) {
+        double lux = pow(10.0, maxLog * i / 63.0) - 1.0;
+        pts[i].x = CHART_X(lux);
+        pts[i].y = CHART_Y(Ambient_LevelFor(&g_autoInfo.curve, lux));
+    }
+    Polyline(dc, pts, 64);
+
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    HBRUSH pointBrush = CreateSolidBrush(HexToColorRef(CLR_SUBTEXT));
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dc, pointBrush);
+    for (int i = 0; i < g_autoInfo.curve.count; i++) {
+        int x = CHART_X(g_autoInfo.curve.points[i].lux);
+        int y = CHART_Y(g_autoInfo.curve.points[i].level);
+        Ellipse(dc, x - 3, y - 3, x + 4, y + 4);
+    }
+    if (g_autoInfo.hasLux && g_autoInfo.level >= 0) {
+        HBRUSH nowBrush = CreateSolidBrush(HexToColorRef(CLR_TEXT));
+        SelectObject(dc, nowBrush);
+        int x = CHART_X(g_autoInfo.lux), y = CHART_Y(g_autoInfo.level);
+        Ellipse(dc, x - 5, y - 5, x + 6, y + 6);
+        SelectObject(dc, pointBrush);
+        DeleteObject(nowBrush);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pointBrush);
+    DeleteObject(line);
+    DeleteObject(grid);
+
+    /* Decade labels under the axis. */
+    SelectObject(dc, fontSmall);
+    SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
+    static const WCHAR *names[] = { L"0 lx", L"10", L"100", L"1k", L"10k", L"100k", L"1M" };
+    double lux = 0;
+    for (int i = 0; i < 7; i++, lux = (lux == 0 ? 10 : lux * 10)) {
+        if (log10(lux + 1.0) > maxLog + 1e-9)
+            break;
+        int x = CHART_X(lux);
+        RECT rc = { x - 20, cb + 4, x + 20, cb + 18 };
+        UINT align = DT_CENTER;
+        if (i == 0) { rc.left = x; rc.right = x + 40; align = DT_LEFT; }
+        else if (x > cr - 20) { rc.left = cr - 40; rc.right = cr; align = DT_RIGHT; }
+        DrawTextW(dc, names[i], -1, &rc, align | DT_SINGLELINE);
+    }
+    #undef CHART_X
+    #undef CHART_Y
+}
+
+/* The panel in words, for screen readers. */
+static void AutoSpokenText(WCHAR *out, int cch)
+{
+    const AutoInfo *a = &g_autoInfo;
+    WCHAR curve[48];
+    if (a->curve.count == 0)
+        lstrcpyW(curve, L"default curve");
+    else
+        _snwprintf(curve, 47, L"%d learned points", a->curve.count);
+    curve[47] = L'\0';
+    switch (a->state) {
+    case AUTO_INFO_OFF:
+        _snwprintf(out, cch - 1, L"Auto brightness off, sensor in %s", a->place);
+        break;
+    case AUTO_INFO_OFFLINE:
+        _snwprintf(out, cch - 1, L"Auto brightness: Home Assistant offline, the schedule is active");
+        break;
+    case AUTO_INFO_CONNECTING:
+        _snwprintf(out, cch - 1, L"Auto brightness, %s, connecting", a->place);
+        break;
+    case AUTO_INFO_NO_READING:
+        _snwprintf(out, cch - 1, L"Auto brightness, %s, the sensor has no reading", a->place);
+        break;
+    default:
+        _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %d percent, %s",
+                   a->place, a->lux, a->level, curve);
+        break;
+    }
+    out[cch - 1] = L'\0';
 }
 
 static void GetSliderRect(int row, RECT *rc)
@@ -189,9 +373,11 @@ static void GetItemFocusRect(PopupData *pd, int item, RECT *rc)
     }
 }
 
+/* The auto brightness panel is one more item after the sliders, read only
+   and outside the Tab order (the keyboard items map to monitor rows). */
 static int PopupA11yCount(void *ctx)
 {
-    return ItemCount((PopupData *)ctx);
+    return ItemCount((PopupData *)ctx) + (g_autoInfo.state != AUTO_INFO_HIDDEN ? 1 : 0);
 }
 
 static void PopupA11yDescribe(void *ctx, int index, A11yItem *out)
@@ -201,6 +387,14 @@ static void PopupA11yDescribe(void *ctx, int index, A11yItem *out)
         out->role = ROLE_SYSTEM_DIALOG;
         out->state = STATE_SYSTEM_FOCUSABLE;
         wcscpy(out->name, APP_NAME L" brightness");
+        return;
+    }
+    if (index == ItemCount(pd)) {
+        out->role = ROLE_SYSTEM_STATICTEXT;
+        out->state = STATE_SYSTEM_READONLY;
+        int top = AutoPanelTop(pd);
+        SetRect(&out->rect, POPUP_PADDING, top, POPUP_WIDTH - POPUP_PADDING, top + AutoPanelHeight());
+        AutoSpokenText(out->name, 160);
         return;
     }
     int row = ItemRow(index);
@@ -376,6 +570,8 @@ static void RenderPopup(HWND hwnd, PopupData *pd)
     DeleteObject(noPen);
     DeleteObject(trackBrush);
     DeleteObject(fillBrush);
+
+    DrawAutoPanel(dc, pd, w, hFont, hFontSmall);
 
     if (pd->focusVisible && pd->focusItem >= 0 && pd->focusItem < ItemCount(pd)) {
         RECT rcFocus;
@@ -790,6 +986,23 @@ void UI_TogglePopup(HWND hwnd, MonitorList *ml)
 BOOL UI_IsPopupVisible(HWND hwnd)
 {
     return hwnd && IsWindowVisible(hwnd);
+}
+
+void UI_SetAutoInfo(HWND hwnd, const AutoInfo *info)
+{
+    int before = AutoPanelHeight();
+    g_autoInfo = *info;
+    if (!hwnd || !IsWindowVisible(hwnd))
+        return;
+    int grow = AutoPanelHeight() - before;
+    if (grow != 0) {
+        /* The popup sits above the tray: keep its bottom edge where it is. */
+        RECT rc;
+        GetWindowRect(hwnd, &rc);
+        SetWindowPos(hwnd, NULL, rc.left, rc.top - grow, POPUP_WIDTH, (rc.bottom - rc.top) + grow,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    RenderPopup(hwnd, &g_popupData);
 }
 
 void UI_RefreshPopup(HWND hwnd, MonitorList *ml)
