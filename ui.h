@@ -65,6 +65,7 @@ typedef struct {
     WCHAR        place[64];   /* the sensor's area, or its name when it has none */
     double       lux;         /* smoothed reading, valid when hasLux */
     BOOL         hasLux;
+    BOOL         adjusting;   /* a change in the light is seen, the level follows shortly */
     int          level;       /* All Monitors level now, -1 when unknown */
     AmbientCurve curve;       /* a copy; count 0 means the default curve */
 } AutoInfo;
@@ -87,6 +88,11 @@ void UI_SetRangeChangeCallback(RangeChangeCallback cb);
    that was set, or -1 when the slider of a single monitor moved. */
 typedef void (*ManualChangeCallback)(int masterLevel);
 void UI_SetManualChangeCallback(ManualChangeCallback cb);
+
+/* Where the All Monitors slider gets its level. Without it the popup reads
+   the level back from the monitors. */
+typedef int (*MasterLevelSource)(void);
+void UI_SetMasterLevelSource(MasterLevelSource source);
 
 /* Context menu dimensions */
 #define CTXMENU_WIDTH   220

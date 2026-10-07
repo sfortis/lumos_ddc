@@ -96,6 +96,13 @@ static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
 #define AUTO_OFFLINE_AFTER  3
 #define AUTO_SAVE_TIMER_ID  0xB106
 #define AUTO_SAVE_DELAY_MS  3000
+/* A large change in the light is applied once a second reading confirms it.
+   That reading is taken AUTO_CONFIRM_MS after the first instead of at the
+   next regular poll, so a lamp switched on shows within about 10 to 40 s.
+   Polling faster all the time would sample a noisy sensor more often and
+   change the level for nothing more often. */
+#define AUTO_CONFIRM_TIMER_ID 0xB107
+#define AUTO_CONFIRM_MS       10000
 
 static HINSTANCE    g_hInst;
 static HWND         g_hwndHidden;    /* Hidden top-level window (receives broadcasts + notifications) */
@@ -167,6 +174,7 @@ static void Schedule_Suspend(void);
 static void ManualChange(void);
 static void PopupChange(int masterLevel);
 static int  MasterTargetFromMonitors(void);
+static int  DisplayedMasterLevel(void);
 static void Idle_Tick(void);
 static void Idle_Restore(void);
 static BOOL Auto_Owns(void);
@@ -271,6 +279,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
     /* Brightness schedule: suspend on manual slider changes, tick every minute,
        and apply the current time slot immediately at startup. */
     UI_SetManualChangeCallback(PopupChange);
+    UI_SetMasterLevelSource(DisplayedMasterLevel);
     SetTimer(g_hwndHidden, SCHEDULE_TIMER_ID, SCHEDULE_TICK_MS, NULL);
     Schedule_ApplyNow();
 
@@ -671,10 +680,21 @@ static Settings    *AppSettings(void) { return &g_settings; }
 /* What the monitors show now, as an All Monitors level. Read from the
    monitors rather than g_masterTarget, which holds the level to come back to
    while the idle dim is on. */
+/* The All Monitors level to show: the one we set, when we know it. Reading
+   it back from the monitors loses precision (with a 50 point range one
+   monitor level is two master levels, so 37 read back as 38), and it was
+   shown next to the exact value in the auto brightness panel. While the idle
+   dim holds the monitors, g_masterTarget is the level to come back to, so
+   the monitors are read instead. */
+static int DisplayedMasterLevel(void)
+{
+    int v = (!g_idleDimmed && g_masterTarget >= 0) ? g_masterTarget : MasterTargetFromMonitors();
+    return v < 0 ? 0 : (v > 100 ? 100 : v);
+}
+
 static int AppMasterLevel(void)
 {
-    int v = MasterTargetFromMonitors();
-    return v < 0 ? 0 : (v > 100 ? 100 : v);
+    return DisplayedMasterLevel();
 }
 
 static BOOL AppSetMaster(int percent)
@@ -699,6 +719,9 @@ static BOOL AppSetMonitor(int index, int percent)
     if (index < 0 || index >= g_monitors.count) return FALSE;
     RemoteActivity();
     BOOL ok = Monitor_SetBrightness(&g_monitors.monitors[index], (DWORD)percent);
+    /* One monitor moved: the All Monitors level is what the monitors show now,
+       as after a single slider in the popup. */
+    g_masterTarget = MasterTargetFromMonitors();
     UI_RefreshPopup(g_hwndPopup, &g_monitors);
     ManualChange();
     return ok;
@@ -1098,6 +1121,9 @@ static void Auto_PublishInfo(void)
        shows; the smoothed value only steers the level. */
     info.hasLux = (g_autoRawLux >= 0);
     info.lux = g_autoRawLux;
+    /* A change is seen but not applied yet: held for confirmation, or a small
+       one waiting for the readings to agree. */
+    info.adjusting = g_autoFilter.pending || g_autoGate.count > 0;
     UI_SetAutoInfo(g_hwndPopup, &info);
 }
 
@@ -1176,6 +1202,8 @@ static void Auto_OnReading(AutoReading *r)
             g_autoRawLux = r->lux;
             g_autoLux = Ambient_Smooth(&g_autoFilter, r->lux);
             Auto_Apply(FALSE);
+            if (g_autoFilter.pending)
+                SetTimer(g_hwndHidden, AUTO_CONFIRM_TIMER_ID, AUTO_CONFIRM_MS, NULL);
         }
         /* "unavailable" or "unknown": keep the level we have */
     } else if (++g_autoFailures >= AUTO_OFFLINE_AFTER && g_autoOnline) {
@@ -1219,6 +1247,7 @@ static void Auto_Configure(void)
     memset(&g_autoFilter, 0, sizeof(g_autoFilter));
     Ambient_GateReset(&g_autoGate);
     KillTimer(g_hwndHidden, AUTO_TIMER_ID);
+    KillTimer(g_hwndHidden, AUTO_CONFIRM_TIMER_ID);
     if (Auto_Configured()) {
         /* Assume Home Assistant answers until polls say otherwise, so the
            schedule does not jump in for the first seconds. */
@@ -1456,6 +1485,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (wParam == IDLE_TIMER_ID) {
             Idle_Tick();
         } else if (wParam == AUTO_TIMER_ID) {
+            Auto_Poll();
+        } else if (wParam == AUTO_CONFIRM_TIMER_ID) {
+            KillTimer(hwnd, AUTO_CONFIRM_TIMER_ID);
             Auto_Poll();
         } else if (wParam == AUTO_SAVE_TIMER_ID) {
             KillTimer(hwnd, AUTO_SAVE_TIMER_ID);

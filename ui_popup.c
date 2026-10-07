@@ -35,8 +35,17 @@ static int GetMonPercent(BrightMonitor *mon)
     return Monitor_GetPercent(mon);
 }
 
+static MasterLevelSource g_masterSource = NULL;
+
+void UI_SetMasterLevelSource(MasterLevelSource source)
+{
+    g_masterSource = source;
+}
+
 static int GetMasterPercent(MonitorList *ml)
 {
+    if (g_masterSource)
+        return g_masterSource();
     /* Map each reading back through its range and average the results */
     int sum = 0, cnt = 0;
     for (int i = 0; i < ml->count; i++) {
@@ -167,6 +176,8 @@ static void AutoStatusText(WCHAR *left, WCHAR *right, int cch)
         lstrcpynW(right, L"connecting...", cch);
     else if (a->state == AUTO_INFO_NO_READING)
         _snwprintf(right, cch - 1, a->level >= 0 ? L"no reading, %d%%" : L"no reading", a->level);
+    else if (a->hasLux && a->adjusting)
+        _snwprintf(right, cch - 1, L"%.0f lx \x2192 adjusting...", a->lux);
     else if (a->hasLux && a->level >= 0)
         _snwprintf(right, cch - 1, L"%.0f lx \x2192 %d%%", a->lux, a->level);
     right[cch - 1] = L'\0';
@@ -301,8 +312,8 @@ static void AutoSpokenText(WCHAR *out, int cch)
         _snwprintf(out, cch - 1, L"Auto brightness, %s, the sensor has no reading", a->place);
         break;
     default:
-        _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %d percent, %s",
-                   a->place, a->lux, a->level, curve);
+        _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %d percent%s, %s",
+                   a->place, a->lux, a->level, a->adjusting ? L", adjusting" : L"", curve);
         break;
     }
     out[cch - 1] = L'\0';
