@@ -159,7 +159,7 @@ The Home Assistant window stays open when you click elsewhere, so you can copy t
 
 A curve turns the light into a brightness level. Until it learns anything, the curve is 20% at 0 lx, 40% at 10 lx, 70% at 100 lx and 100% at 1000 lx, and the level is interpolated on a logarithmic scale between those points, because the eye judges light by ratios.
 
-When you change the brightness yourself while auto brightness is on (a hotkey, the mouse wheel, a slider, a preset or `lumosctl`), Lumos keeps your level and adds it to the curve as the level you want at the current light. The curve holds up to eight points. A new point replaces one at a similar light level, and points that would make the screens darker as the room gets brighter are removed. To start over, click **Learned curve** in Settings and press Save.
+When you change the brightness yourself while auto brightness is on (a hotkey, the mouse wheel, a slider, a preset or `lumosctl`), Lumos keeps your level and adds it to the curve as the level you want at the current light. The first learned point is added to the four default points, and the curve holds at most eight points in total. A new point replaces one at a similar light level, and points that would make the screens darker as the room gets brighter are removed. To start over, click **Learned curve** in Settings and press Save.
 
 Many indoor sensors report small random changes in a dark room, for example 0, 5 and 8 lx. Lumos smooths the readings so the screens do not change every few minutes because of that noise. A large change, such as a lamp switched on, is applied once a second reading 10 seconds later confirms it, so the screens follow it within about half a minute.
 
@@ -258,7 +258,7 @@ Token=AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA...
 Sensor=sensor.living_room_illuminance
 SensorLabel=Living Room: Illuminance
 AutoBrightness=1
-Curve=0:25,77:85
+Curve=0:20,10:40,77:85,1000:100
 ```
 
 In Settings, a number changes with its `-` and `+` buttons or with the mouse wheel over the row, a switch flips when you click it, and nothing is written until you press Save. Cancel, `Esc` or a click outside the window closes it without saving. The schedule editor has the same buttons and closes the same way. Both windows can be moved by dragging any spot that is not a control.
@@ -267,7 +267,7 @@ Hotkeys are stored as text. Modifiers are `Ctrl`, `Alt`, `Shift` and `Win`, and 
 
 Each line in `[Ranges]` is a monitor name followed by its minimum and maximum, the levels it takes when All Monitors is at 0% and at 100%. A second monitor with the same name is stored as `Name #2`, so two identical models keep separate ranges. A range is at least 20 points wide, so every brightness step still moves the monitor. A monitor without a line starts at `0,100`. A `config.ini` from an older version has a `[Deltas]` section with one offset per monitor instead. Lumos converts those offsets into ranges that keep the monitors matched the same way (offsets of +10 and -30 become `40,100` and `0,60`), and it leaves `[Deltas]` untouched so an older version still finds its offsets.
 
-The `[HomeAssistant]` section is written by the Home Assistant window and by Settings. `Token` is encrypted for your Windows account and cannot be typed in by hand. `Sensor` is the entity id and `SensorLabel` is the "Area: Name" text shown in Settings. `Curve` holds the learned points as `lux:level` pairs, and an empty value means the default curve.
+The `[HomeAssistant]` section is written by the Home Assistant window and by Settings. `Token` is encrypted for your Windows account and cannot be typed in by hand. `Sensor` is the entity id and `SensorLabel` is the "Area: Name" text shown in Settings. `Curve` holds the points of the curve as `lux:level` pairs, the default points that are left together with the learned ones, and an empty value means the default curve.
 
 `IdleDimEnabled` turns idle dim on and off, and the tray menu toggles the same key. `IdleDimPercent` is the level held while the session is idle (0 to 100). `IdleDimMinutes` is how long there must be no keyboard or mouse input before the dim happens (1 to 1440 minutes).
 
