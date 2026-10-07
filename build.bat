@@ -16,17 +16,18 @@ if /i "%1"=="debug" (
 )
 
 :: Compile resource
-rc /nologo /fo build\lumos.res lumos.rc
+rc /nologo /i src /i res /fo build\lumos.res res\lumos.rc
 if errorlevel 1 (
     echo Resource compilation failed.
     exit /b 1
 )
 
 :: Compile and link (all intermediates and the exe go to build\)
-cl /nologo /O2 /W4 /WX- %DEFS% ^
-   lumos.c monitor.c brightmap.c ui.c ui_draw.c ui_popup.c ui_osd.c ui_menu.c ^
-   ui_sched.c ui_settings.c ui_about.c ui_hass.c presets.c schedule.c hotkey.c ^
-   a11y.c remote.c wmibright.c capture.c hass.c json.c ambient.c secret.c ^
+cl /nologo /O2 /W4 /WX- %DEFS% /I src ^
+   src\lumos.c src\monitor.c src\brightmap.c src\ui.c src\ui_draw.c src\ui_popup.c ^
+   src\ui_osd.c src\ui_menu.c src\ui_sched.c src\ui_settings.c src\ui_about.c src\ui_hass.c ^
+   src\presets.c src\schedule.c src\hotkey.c src\a11y.c src\remote.c src\wmibright.c ^
+   src\capture.c src\hass.c src\json.c src\ambient.c src\secret.c ^
    build\lumos.res ^
    /Fo"build\\" /Fe:build\lumos.exe ^
    /link /subsystem:windows ^
@@ -40,7 +41,7 @@ if errorlevel 1 (
 )
 
 :: lumosctl: console program for the command line
-cl /nologo /O2 /W4 /WX- %DEFS% lumosctl.c cliparse.c ^
+cl /nologo /O2 /W4 /WX- %DEFS% /I src src\lumosctl.c src\cliparse.c ^
    /Fo"build\\" /Fe:build\lumosctl.exe /link /subsystem:console user32.lib
 
 if errorlevel 1 (

@@ -106,21 +106,15 @@ During detection, Lumos first tries to read each monitor's brightness over DDC/C
 
 ### Build from source
 
-Cross-compile from Linux or WSL with MinGW (the outputs go to `build/`):
+Cross-compile from Linux or WSL with MinGW. The outputs go to `build/`.
 
 ```bash
-mkdir -p build
-x86_64-w64-mingw32-windres lumos.rc -O coff -o build/lumos.res
-x86_64-w64-mingw32-gcc -O2 -s -Wall -mwindows -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 \
-  lumos.c monitor.c brightmap.c ui.c ui_draw.c ui_popup.c ui_osd.c ui_menu.c ui_sched.c \
-  ui_settings.c ui_about.c ui_hass.c presets.c schedule.c hotkey.c a11y.c remote.c wmibright.c \
-  capture.c hass.c json.c ambient.c secret.c \
-  build/lumos.res -o build/lumos.exe \
-  -ldxva2 -luser32 -lgdi32 -lshell32 -lcomctl32 -ladvapi32 -lole32 -loleaut32 -lwbemuuid -ldwmapi \
-  -lwtsapi32 -loleacc -lwinhttp -lcrypt32 -luxtheme -lkernel32 -lm
-x86_64-w64-mingw32-gcc -O2 -s -Wall -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 \
-  lumosctl.c cliparse.c -o build/lumosctl.exe -luser32
+make            # build/lumos.exe and build/lumosctl.exe
+make test       # build and run the unit tests with the native gcc
+make debug      # build/lumos-debug.exe, logs to %APPDATA%\Lumos\lumos-*.log
 ```
+
+The source code is in `src/`, the unit tests are in `tests/`, and the icon and the resource script are in `res/`.
 
 Or with MSVC from a Developer Command Prompt (this also writes to `build/`):
 
