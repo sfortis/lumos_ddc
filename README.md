@@ -5,6 +5,7 @@
 **One brightness control for every screen: external monitors over DDC/CI and the laptop panel over WMI, from the Windows tray.**
 
 [![Release](https://img.shields.io/github/v/release/sfortis/lumos_ddc?logo=github)](https://github.com/sfortis/lumos_ddc/releases/latest)
+[![Build](https://github.com/sfortis/lumos_ddc/actions/workflows/build.yml/badge.svg?branch=dev)](https://github.com/sfortis/lumos_ddc/actions/workflows/build.yml)
 [![Downloads](https://img.shields.io/github/downloads/sfortis/lumos_ddc/total?logo=github)](https://github.com/sfortis/lumos_ddc/releases)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![Language](https://img.shields.io/badge/C-native%20Windows%20API-A8B9CC?logo=c&logoColor=white)
