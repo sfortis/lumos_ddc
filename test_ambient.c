@@ -78,6 +78,18 @@ int main(void)
     Ambient_DefaultCurve(&c);
     Ambient_Learn(&c, -5, 150);
     CHECK(c.points[0].lux == 0 && c.points[0].level == 100, "lux and level clamped");
+    Ambient_DefaultCurve(&c);
+    Ambient_Learn(&c, 5e6, 90);
+    CHECK(c.points[c.count - 1].lux == 1e6, "lux above a million clamped, so Parse reads it back");
+    AmbientFilter inf = { 0 };
+    double huge = 1e308 * 10;
+    CHECK(Ambient_Smooth(&inf, huge) <= 1e6 + 1, "an infinite reading is clamped (to 1e6, give or take rounding)");
+
+    /* The latest lux is the pending one while a change waits */
+    AmbientFilter late = { 0 };
+    Ambient_Smooth(&late, 8);
+    Ambient_Smooth(&late, 300);
+    CHECK(Ambient_LatestLux(&late) > 290 && Ambient_LatestLux(&late) < 310, "latest lux is the held reading");
 
     /* Parse and format */
     Ambient_DefaultCurve(&c);

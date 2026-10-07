@@ -80,6 +80,10 @@ typedef struct {
 /* Feed one reading (lux >= 0) and return the smoothed lux. */
 double Ambient_Smooth(AmbientFilter *f, double lux);
 
+/* The light the room is in now as far as the filter knows: a large change
+   still waiting for confirmation, otherwise the smoothed value. */
+double Ambient_LatestLux(const AmbientFilter *f);
+
 /* The gate decides when the target level is applied. A change of at least
    AMBIENT_BIG levels is applied at once. A smaller one must be at least
    AMBIENT_HYSTERESIS levels (or reach 0 or 100) and point the same way for

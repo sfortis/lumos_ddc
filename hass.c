@@ -2,6 +2,7 @@
 #include "json.h"
 #include <winhttp.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,12 +12,18 @@
 
 /* One line per illuminance sensor: entity, name, area, state, separated by
    tabs. area_name() falls back to the device's area. attributes.get() keeps
-   sensors without a device_class from failing the render. */
+   sensors without a device_class from failing the render. Names and areas
+   lose their tabs and line breaks, which would shift the fields. */
 static const char kListTemplate[] =
     "{%- for s in states.sensor if s.attributes.get('device_class') == 'illuminance' -%}"
     "{{ s.entity_id }}{{ '\\t' }}{{ s.name | replace('\\t', ' ') | replace('\\n', ' ') }}"
-    "{{ '\\t' }}{{ area_name(s.entity_id) or '' }}{{ '\\t' }}{{ s.state }}{{ '\\n' }}"
+    "{{ '\\t' }}{{ (area_name(s.entity_id) or '') | replace('\\t', ' ') | replace('\\n', ' ') }}"
+    "{{ '\\t' }}{{ s.state }}{{ '\\n' }}"
     "{%- endfor -%}";
+
+/* WebSocket messages are read in pieces; a reply in more pieces than this is
+   not one of ours (a broken or hostile server sending empty fragments). */
+#define HASS_MAX_FRAGMENTS 1024
 
 /* ---- Connection ---- */
 
@@ -56,6 +63,11 @@ static HassStatus OpenConn(HassConn *c, const WCHAR *url)
     if (!c->session)
         return HASS_ERR_CONNECT;
     WinHttpSetTimeouts(c->session, HASS_TIMEOUT_MS, HASS_TIMEOUT_MS, HASS_TIMEOUT_MS, HASS_TIMEOUT_MS);
+    /* The token is attached as a header we add ourselves, so a redirect could
+       carry it to another host. Home Assistant has no reason to redirect an
+       API call; a 3xx is reported as an error instead. */
+    DWORD noRedirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(c->session, WINHTTP_OPTION_REDIRECT_POLICY, &noRedirect, sizeof(noRedirect));
     c->connect = WinHttpConnect(c->session, host, uc.nPort, 0);
     if (!c->connect) {
         CloseConn(c);
@@ -104,11 +116,12 @@ static HINTERNET OpenGet(HassConn *c, const WCHAR *suffix, const char *token)
     WCHAR header[HASS_TOKEN_MAX + 64];
     int n = _snwprintf(header, sizeof(header) / sizeof(header[0]) - 1,
                        L"Authorization: Bearer %hs\r\n", token);
-    if (n < 0 || !WinHttpAddRequestHeaders(req, header, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD)) {
+    BOOL added = (n >= 0) && WinHttpAddRequestHeaders(req, header, (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+    SecureZeroMemory(header, sizeof(header));
+    if (!added) {
         WinHttpCloseHandle(req);
         return NULL;
     }
-    SecureZeroMemory(header, sizeof(header));
     return req;
 }
 
@@ -157,7 +170,9 @@ static BOOL ParseLux(const char *s, double *lux)
 {
     char *end;
     double v = strtod(s, &end);
-    if (end == s || *end != '\0' || v < 0 || v != v)
+    /* "inf", "1e999" and NaN are not light levels; neither is anything above
+       a million lux (direct sunlight is about 100 000). */
+    if (end == s || *end != '\0' || !isfinite(v) || v < 0 || v > 1e6)
         return FALSE;
     *lux = v;
     return TRUE;
@@ -187,16 +202,19 @@ HassStatus Hass_ReadLux(const WCHAR *url, const char *token, const WCHAR *entity
     if (st == HASS_OK) {
         int len = 0;
         char *body = ReadBody(req, &len);
-        st = HASS_ERR_PROTOCOL;
+        st = body ? HASS_ERR_PROTOCOL : HASS_ERR_CONNECT;   /* no body: the connection broke */
         if (body) {
-            JsonToken tok[256];   /* a state reply is small; per call, so threads never share it */
-            int n = Json_Parse(body, len, tok, 256);
+            /* Per call, so threads never share it; 1024 tokens leave room for a
+               sensor with many attributes. */
+            JsonToken *tok = (JsonToken *)malloc(sizeof(JsonToken) * 1024);
+            int n = tok ? Json_Parse(body, len, tok, 1024) : -1;
             int v = (n > 0) ? Json_Get(body, tok, n, 0, "state") : -1;
             char state[64];
             if (v >= 0 && Json_GetString(body, &tok[v], state, sizeof state) >= 0) {
                 *hasValue = ParseLux(state, lux);
                 st = HASS_OK;
             }
+            free(tok);
             free(body);
         }
     }
@@ -210,10 +228,11 @@ HassStatus Hass_ReadLux(const WCHAR *url, const char *token, const WCHAR *entity
 /* Receive one complete text message into a malloc'd, NUL-terminated buffer. */
 static char *WsReceive(HINTERNET ws, int *len)
 {
-    int cap = 8192, n = 0;
+    int cap = 8192, n = 0, fragments = 0;
     char *buf = (char *)malloc((size_t)cap);
     for (;;) {
         if (!buf) return NULL;
+        if (++fragments > HASS_MAX_FRAGMENTS) { free(buf); return NULL; }
         if (n + 4096 + 1 > cap) {
             if (cap >= HASS_BODY_MAX) { free(buf); return NULL; }
             char *bigger = (char *)realloc(buf, (size_t)cap * 2);
@@ -272,10 +291,16 @@ static BOOL WsReceiveTyped(HINTERNET ws, WsMessage *m)
     return TRUE;
 }
 
-static void Utf8ToWide(const char *s, int len, WCHAR *out, int cap)
+/* Convert len bytes of UTF-8. A text longer than the buffer is cut to fit
+   (MultiByteToWideChar alone would return nothing at all). Returns FALSE
+   when nothing could be converted or the text had to be cut. */
+static BOOL Utf8ToWide(const char *s, int len, WCHAR *out, int cap)
 {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, len, out, cap - 1);
-    out[n > 0 ? n : 0] = L'\0';
+    WCHAR tmp[512];
+    int n = (len > 0) ? MultiByteToWideChar(CP_UTF8, 0, s, len, tmp, 511) : 0;
+    tmp[n > 0 ? n : 0] = L'\0';
+    lstrcpynW(out, tmp, cap);
+    return n > 0 && n < cap;
 }
 
 /* Split the rendered template into sensors. */
@@ -299,16 +324,22 @@ static int ParseList(const char *text, HassSensor *out, int max)
             p = fe + 1;
         }
         if (nf == 4 && flen[0] > 0) {
-            HassSensor *s = &out[count++];
-            Utf8ToWide(f[0], flen[0], s->entityId, HASS_ENTITY_MAX);
-            Utf8ToWide(f[1], flen[1], s->name, 128);
-            Utf8ToWide(f[2], flen[2], s->area, 64);
-            char state[64];
-            int sl = flen[3] < 63 ? flen[3] : 63;
-            memcpy(state, f[3], (size_t)sl);
-            state[sl] = '\0';
-            s->hasValue = ParseLux(state, &s->lux);
-            if (!s->hasValue) s->lux = 0;
+            HassSensor *s = &out[count];
+            /* An entity id that does not fit cannot be saved and read back,
+               so the sensor is left out; a long name or area is just cut. */
+            if (Utf8ToWide(f[0], flen[0], s->entityId, HASS_ENTITY_MAX)) {
+                count++;
+                Utf8ToWide(f[1], flen[1], s->name, 128);
+                Utf8ToWide(f[2], flen[2], s->area, 64);
+                char state[64];
+                s->hasValue = FALSE;
+                if (flen[3] < 64) {   /* a longer state is no number we accept */
+                    memcpy(state, f[3], (size_t)flen[3]);
+                    state[flen[3]] = '\0';
+                    s->hasValue = ParseLux(state, &s->lux);
+                }
+                if (!s->hasValue) s->lux = 0;
+            }
         }
         line = *eol ? eol + 1 : eol;
     }
@@ -334,6 +365,7 @@ HassStatus Hass_ListSensors(const WCHAR *url, const char *token,
     WsMessage m = { 0 };
     m.tok = (JsonToken *)malloc(sizeof(JsonToken) * HASS_MAX_TOKENS);
     char *auth = NULL, *cmd = NULL;
+    int authCap = 0;
 
     if (!req || !m.tok) {
         st = HASS_ERR_CONNECT;
@@ -356,6 +388,10 @@ HassStatus Hass_ListSensors(const WCHAR *url, const char *token,
         st = HASS_ERR_PROTOCOL;
         goto done;
     }
+    /* Bound every receive on the socket too, so a server that stops talking
+       cannot hold the worker. */
+    DWORD wsTimeout = HASS_TIMEOUT_MS;
+    WinHttpSetOption(ws, WINHTTP_OPTION_RECEIVE_TIMEOUT, &wsTimeout, sizeof(wsTimeout));
 
     /* HA greets with auth_required, answers the token with auth_ok or
        auth_invalid, then sends the command result and the first render. */
@@ -364,7 +400,8 @@ HassStatus Hass_ListSensors(const WCHAR *url, const char *token,
         goto done;
 
     int tokLen = (int)strlen(token);
-    auth = (char *)malloc((size_t)tokLen * 6 + 64);
+    authCap = tokLen * 6 + 64;
+    auth = (char *)calloc(1, (size_t)authCap);
     if (!auth)
         goto done;
     strcpy(auth, "{\"type\":\"auth\",\"access_token\":");
@@ -400,10 +437,22 @@ HassStatus Hass_ListSensors(const WCHAR *url, const char *token,
     for (int i = 0; i < 4; i++) {
         if (!WsReceiveTyped(ws, &m))
             goto done;
+        /* Only replies to our command (id 1) count. */
+        int id = Json_Get(m.text, m.tok, m.count, 0, "id");
+        if (id < 0 || m.tok[id].type != JSON_PRIMITIVE || m.tok[id].end - m.tok[id].start != 1 ||
+            m.text[m.tok[id].start] != '1')
+            continue;
         if (strcmp(m.type, "result") == 0) {
             int s = Json_Get(m.text, m.tok, m.count, 0, "success");
-            if (s < 0 || !Json_IsTrue(m.text, &m.tok[s]))
+            if (s < 0 || !Json_IsTrue(m.text, &m.tok[s])) {
+                /* A refused command is a permission problem, not a reply
+                   Lumos does not understand. */
+                int err = Json_Get(m.text, m.tok, m.count, 0, "error");
+                int code = Json_Get(m.text, m.tok, m.count, err, "code");
+                if (code >= 0 && Json_IsString(m.text, &m.tok[code], "unauthorized"))
+                    st = HASS_ERR_AUTH;
                 goto done;
+            }
             continue;
         }
         if (strcmp(m.type, "event") == 0) {
@@ -428,6 +477,8 @@ HassStatus Hass_ListSensors(const WCHAR *url, const char *token,
 done:
     free(m.text);
     free(m.tok);
+    if (auth)
+        SecureZeroMemory(auth, (size_t)authCap);   /* also when a step before the send failed */
     free(auth);
     free(cmd);
     if (ws) {

@@ -149,8 +149,10 @@ static void LoadHomeAssistant(Settings *s)
     GetPrivateProfileStringW(sec, L"SensorLabel", L"", s->haSensorLabel, 200, s->iniPath);
     s->haAutoEnabled = (BOOL)GetPrivateProfileIntW(sec, L"AutoBrightness", 0, s->iniPath);
     GetPrivateProfileStringW(sec, L"Curve", L"", buf, 256, s->iniPath);
-    char curve[256];
-    WideCharToMultiByte(CP_UTF8, 0, buf, -1, curve, sizeof curve, NULL, NULL);
+    char curve[512];
+    if (!WideCharToMultiByte(CP_UTF8, 0, buf, -1, curve, sizeof curve, NULL, NULL))
+        curve[0] = '\0';   /* unreadable: the default curve */
+    curve[sizeof curve - 1] = '\0';
     Ambient_Parse(curve, &s->haCurve);
 }
 
@@ -159,8 +161,11 @@ static void SaveHomeAssistant(Settings *s)
     static const WCHAR sec[] = L"HomeAssistant";
     WCHAR buf[2048];
     WritePrivateProfileStringW(sec, L"Url", s->haUrl, s->iniPath);
-    if (Secret_Protect(s->haToken, buf, 2048))
-        WritePrivateProfileStringW(sec, L"Token", buf, s->iniPath);
+    /* If encryption fails, an older token must not stay behind in the file
+       looking saved: the token is cleared instead and asked for again. */
+    if (!Secret_Protect(s->haToken, buf, 2048))
+        buf[0] = L'\0';
+    WritePrivateProfileStringW(sec, L"Token", buf, s->iniPath);
     WritePrivateProfileStringW(sec, L"Sensor", s->haSensor, s->iniPath);
     WritePrivateProfileStringW(sec, L"SensorLabel", s->haSensorLabel, s->iniPath);
     WritePrivateProfileStringW(sec, L"AutoBrightness", s->haAutoEnabled ? L"1" : L"0", s->iniPath);
@@ -433,6 +438,13 @@ void Settings_ApplyRanges(Settings *s, MonitorList *ml)
         mon->rangeHi = s->rangeHi[e];
         s->rangeConnected[e] = TRUE;
     }
+}
+
+BOOL Settings_KnownMonitor(const Settings *s, const MonitorList *ml, int i)
+{
+    WCHAR key[136];
+    RangeKey(ml, i, key, 136);
+    return RangeFind(s, key) >= 0;
 }
 
 void Settings_StoreRanges(Settings *s, const MonitorList *ml)

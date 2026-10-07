@@ -78,4 +78,8 @@ void Settings_ApplyRanges(Settings *s, MonitorList *ml);
    that are not connected are kept. */
 void Settings_StoreRanges(Settings *s, const MonitorList *ml);
 
+/* TRUE when monitor i of *ml has a saved range, which only a monitor that
+   answered once gets: it is worth waiting for when it does not answer now. */
+BOOL Settings_KnownMonitor(const Settings *s, const MonitorList *ml, int i);
+
 #endif /* PRESETS_H */

@@ -121,6 +121,7 @@ static int          g_scheduleSuspendMinute = 0;   /* minute-of-day at suspend *
 static int          g_scheduleResumeMinute = 0;    /* next anchor to resume at */
 static int          g_scheduleLastApplied = -1;    /* last brightness pushed by the schedule */
 static int          g_masterTarget = -1;      /* intended base percent, tracked across hotkey presses */
+static BOOL         g_autoSavePending;  /* a learned curve point waits to be saved (AUTO_SAVE_TIMER_ID) */
 static BOOL         g_idleDimmed = FALSE;     /* TRUE while the idle level is on the monitors */
 static DWORD        g_rescanStartTick = 0;    /* when the current worker was launched */
 static DWORD        g_rescanGeneration = 0;   /* incremented per launch */
@@ -162,6 +163,7 @@ static void InstallMouseHook(void);
 static void RemoveMouseHook(void);
 static void ScheduleRescan(HWND hwnd);
 static void ScheduleRescanFromTrigger(HWND hwnd);
+static int  MarkKnownUnanswered(MonitorList *ml);
 static const AppControl kAppControl;   /* lumosctl actions, defined below */
 static void StartRescan(HWND hwnd);
 static DWORD WINAPI RescanThreadProc(LPVOID param);
@@ -289,6 +291,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
 
     Auto_Configure();   /* polls the light sensor when auto brightness is set up */
 
+    /* A known monitor that did not answer the first scan is retried. */
+    if (MarkKnownUnanswered(&g_monitors) > 0)
+        SetTimer(g_hwndHidden, RESCAN_RETRY_TIMER_ID, kRescanBackoffMs[g_awaitRetry++], NULL);
+
     /* Message loop */
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
@@ -299,6 +305,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
     }
 
     /* Cleanup */
+    if (g_autoSavePending)
+        Settings_Save(&g_settings);   /* a point learned just before Exit */
     RemoveMouseHook();
     UnregisterHotkeys(g_hwndHidden);
     if (g_hPowerNotify) UnregisterPowerSettingNotification(g_hPowerNotify);
@@ -832,6 +840,25 @@ static void ScheduleRescanFromTrigger(HWND hwnd)
     ScheduleRescan(hwnd);
 }
 
+/* A monitor Lumos has never seen answer in this run is normally left alone,
+   but one with a saved range answered DDC/CI in an earlier run. When it does
+   not answer now (Lumos started while the displays were off, or it woke up
+   late), it is waited for like a monitor that stopped answering. Returns how
+   many monitors of *ml are waited for. */
+static int MarkKnownUnanswered(MonitorList *ml)
+{
+    int waiting = 0;
+    for (int i = 0; i < ml->count; i++) {
+        BrightMonitor *mon = &ml->monitors[i];
+        if (!mon->controllable && !mon->awaitingAnswer &&
+            Settings_KnownMonitor(&g_settings, ml, i))
+            mon->awaitingAnswer = TRUE;
+        if (mon->awaitingAnswer)
+            waiting++;
+    }
+    return waiting;
+}
+
 /* ---- Schedule runtime ---- */
 
 static int CurrentMinuteOfDay(void)
@@ -941,8 +968,13 @@ static void Schedule_Suspend(void)
 static void ManualChange(void)
 {
     g_idleDimmed = FALSE;   /* the user just set a level; do not restore over it */
-    Schedule_Suspend();
-    Auto_Learn();           /* with auto brightness on, the change becomes a curve point */
+    /* Under auto brightness the change becomes a curve point. The schedule is
+       not suspended then: it is not running, and a suspension would stop it
+       from taking over when Home Assistant goes offline. */
+    if (Auto_Owns())
+        Auto_Learn();
+    else
+        Schedule_Suspend();
 }
 
 /* A popup slider moved. The next hotkey or wheel step starts from
@@ -1083,10 +1115,14 @@ static BOOL Auto_Configured(void)
     return s->haAutoEnabled && s->haUrl[0] && s->haToken[0] && s->haSensor[0];
 }
 
-/* Auto brightness owns the level: it is set up and Home Assistant answers. */
+/* Auto brightness owns the level: it is set up, Home Assistant answers, and
+   the sensor has given a reading since. Until the first reading (or when the
+   sensor never reports a number) the schedule and the wake restore work as
+   without auto brightness; a sensor that turns "unavailable" later keeps the
+   level of its last reading. */
 static BOOL Auto_Owns(void)
 {
-    return Auto_Configured() && g_autoOnline;
+    return Auto_Configured() && g_autoOnline && g_autoLux >= 0;
 }
 
 /* Tell the popup what auto brightness is doing, for its status panel. */
@@ -1185,7 +1221,8 @@ static void Auto_Apply(BOOL force)
 static void Auto_OnReading(AutoReading *r)
 {
     BOOL current = (r->gen == g_autoGen);
-    g_autoBusy = FALSE;
+    if (current)
+        g_autoBusy = FALSE;   /* a stale reply must not free the slot of the poll after it */
     if (!current || !Auto_Configured()) {
         free(r);
         return;
@@ -1221,14 +1258,17 @@ static void Auto_OnReading(AutoReading *r)
    level wanted for the current light. */
 static void Auto_Learn(void)
 {
-    if (!Auto_Owns() || g_autoLux < 0 || g_masterTarget < 0)
+    if (!Auto_Owns() || g_masterTarget < 0)
         return;
-    Ambient_Learn(&g_settings.haCurve, g_autoLux, g_masterTarget);
+    /* While a large change waits for confirmation, the smoothed value is
+       still the old light; the user is reacting to the new one. */
+    Ambient_Learn(&g_settings.haCurve, Ambient_LatestLux(&g_autoFilter), g_masterTarget);
     /* Start the gate from the level the user chose, so the next reading does
        not move it right back. */
     Ambient_GateReset(&g_autoGate);
     Ambient_Decide(&g_autoGate, g_masterTarget);
     g_autoCurvePoints = g_settings.haCurve.count;
+    g_autoSavePending = TRUE;
     SetTimer(g_hwndHidden, AUTO_SAVE_TIMER_ID, AUTO_SAVE_DELAY_MS, NULL);
     Auto_PublishInfo();
 }
@@ -1491,6 +1531,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Auto_Poll();
         } else if (wParam == AUTO_SAVE_TIMER_ID) {
             KillTimer(hwnd, AUTO_SAVE_TIMER_ID);
+            g_autoSavePending = FALSE;
             Settings_Save(&g_settings);   /* the curve learned from manual changes */
         } else if (wParam == RESCAN_WATCHDOG_TIMER_ID) {
             KillTimer(hwnd, RESCAN_WATCHDOG_TIMER_ID);
@@ -1584,6 +1625,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                   Monitor_CleanupExcept(&g_monitors, fresh));
             g_monitors = *fresh;            /* adopt fresh list (plain struct copy) */
             free(fresh);
+            waiting = MarkKnownUnanswered(&g_monitors);
             Settings_ApplyRanges(&g_settings, &g_monitors);
             g_hwndPopup = UI_CreatePopup(g_hInst, &g_monitors);
             /* g_idleDimmed is included so a monitor plugged in during an idle

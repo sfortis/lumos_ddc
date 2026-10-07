@@ -76,6 +76,9 @@ int main(void)
     const char *lone = "\"\\ud83d\"";
     n = Parse(lone);
     CHECK(n == 1 && Json_GetString(lone, &tok[0], buf, sizeof buf) == -1, "lone high surrogate rejected");
+    const char *nul = "\"auth_ok\\u0000x\"";
+    n = Parse(nul);
+    CHECK(n == 1 && Json_GetString(nul, &tok[0], buf, sizeof buf) == -1, "embedded NUL rejected");
     const char *cut = "\"\\ud83d\\u\"";
     CHECK(Parse(cut) < 0, "truncated second escape rejected by the parser");
 

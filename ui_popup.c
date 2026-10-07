@@ -312,8 +312,12 @@ static void AutoSpokenText(WCHAR *out, int cch)
         _snwprintf(out, cch - 1, L"Auto brightness, %s, the sensor has no reading", a->place);
         break;
     default:
-        _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %d percent%s, %s",
-                   a->place, a->lux, a->level, a->adjusting ? L", adjusting" : L"", curve);
+        if (a->level >= 0)
+            _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %d percent%s, %s",
+                       a->place, a->lux, a->level, a->adjusting ? L", adjusting" : L"", curve);
+        else
+            _snwprintf(out, cch - 1, L"Auto brightness, %s, %.0f lux, %s",
+                       a->place, a->lux, curve);
         break;
     }
     out[cch - 1] = L'\0';

@@ -80,9 +80,10 @@ static DWORD WINAPI ListThread(LPVOID param)
         res->gen = job->gen;
         res->status = Hass_ListSensors(job->url, job->token, res->sensors,
                                        HASS_MAX_SENSORS, &res->count);
-        if (!PostMessageW(job->hwnd, WM_APP_HASS_LIST, 0, (LPARAM)res))
-            free(res);   /* the window is gone */
     }
+    /* Posted even without memory (res NULL), so the window does not stay busy. */
+    if (!PostMessageW(job->hwnd, WM_APP_HASS_LIST, job->gen, (LPARAM)res))
+        free(res);   /* the window is gone */
     SecureZeroMemory(job->token, sizeof(job->token));
     free(job);
     return 0;
@@ -97,18 +98,58 @@ static void SetStatus(const WCHAR *text, BOOL error)
     InvalidateRect(g_ha.status, NULL, TRUE);
 }
 
-/* The token typed into the field, or the saved one when the field is empty. */
-static void CurrentToken(char *out, int cap)
+/* Compare two URLs the way the token cares about: the same text, ignoring
+   case and trailing slashes. */
+static BOOL SameUrl(const WCHAR *a, const WCHAR *b)
 {
+    int la = lstrlenW(a), lb = lstrlenW(b);
+    while (la > 0 && a[la - 1] == L'/') la--;
+    while (lb > 0 && b[lb - 1] == L'/') lb--;
+    return la == lb && CompareStringOrdinal(a, la, b, lb, TRUE) == CSTR_EQUAL;
+}
+
+/* The token for the URL in the field: the one typed, or the saved one when
+   the field is empty. The saved token is only ever sent to the URL it was
+   saved with, so a changed URL needs the token typed again. Returns a status
+   message for the user when there is no usable token, or NULL. */
+static const WCHAR *CurrentToken(const WCHAR *url, char *out, int cap)
+{
+    out[0] = '\0';
     WCHAR typed[HASS_TOKEN_MAX];
     GetWindowTextW(g_ha.token, typed, HASS_TOKEN_MAX);
+    const WCHAR *problem = NULL;
     if (typed[0]) {
-        WideCharToMultiByte(CP_UTF8, 0, typed, -1, out, cap, NULL, NULL);
-        out[cap - 1] = '\0';
+        if (!WideCharToMultiByte(CP_UTF8, 0, typed, -1, out, cap, NULL, NULL)) {
+            out[0] = '\0';
+            problem = L"The token is too long.";
+        }
+    } else if (!g_ha.settings->haToken[0]) {
+        problem = L"Enter an access token.";
+    } else if (!SameUrl(url, g_ha.settings->haUrl)) {
+        problem = L"The URL changed: enter the token again for the new address.";
     } else {
         lstrcpynA(out, g_ha.settings->haToken, cap);
     }
     SecureZeroMemory(typed, sizeof(typed));
+    return problem;
+}
+
+/* An http URL sends the token unencrypted. It is allowed, because many
+   Home Assistant installations on a home network have no https, but the
+   window says so plainly (user decision). */
+static const WCHAR kHttpWarning[] =
+    L"This is http: the token travels unencrypted. Use https if you can.";
+
+static BOOL IsPlainHttp(const WCHAR *url)
+{
+    return CompareStringOrdinal(url, 7, L"http://", 7, TRUE) == CSTR_EQUAL;
+}
+
+/* The list belongs to the server it came from. */
+static void ClearList(void)
+{
+    g_ha.count = 0;
+    SendMessageW(g_ha.list, LB_RESETCONTENT, 0, 0);
 }
 
 static void StartList(void)
@@ -119,9 +160,10 @@ static void StartList(void)
     if (!job)
         return;
     GetWindowTextW(g_ha.url, job->url, HASS_URL_MAX);
-    CurrentToken(job->token, HASS_TOKEN_MAX);
-    if (!job->url[0] || !job->token[0]) {
-        SetStatus(L"Enter the URL and an access token first.", TRUE);
+    const WCHAR *problem = job->url[0] ? CurrentToken(job->url, job->token, HASS_TOKEN_MAX)
+                                       : L"Enter the URL of Home Assistant.";
+    if (problem) {
+        SetStatus(problem, TRUE);
         SecureZeroMemory(job->token, sizeof(job->token));
         free(job);
         return;
@@ -180,16 +222,17 @@ static void FillList(void)
         SendMessageW(g_ha.list, LB_SETCURSEL, select, 0);
 }
 
-static void OnListResult(ListResult *res)
+static void OnListResult(DWORD gen, ListResult *res)
 {
-    if (res->gen != g_ha.gen) {
+    if (gen != g_ha.gen) {
         free(res);
         return;
     }
     g_ha.busy = FALSE;
     EnableWindow(g_ha.connect, TRUE);
-    if (res->status != HASS_OK) {
-        SetStatus(Hass_StatusText(res->status), TRUE);
+    if (!res || res->status != HASS_OK) {
+        ClearList();   /* a failed Connect leaves no list from an earlier server */
+        SetStatus(res ? Hass_StatusText(res->status) : L"Out of memory.", TRUE);
         free(res);
         return;
     }
@@ -198,6 +241,12 @@ static void OnListResult(ListResult *res)
     free(res);
     qsort(g_ha.sensors, (size_t)g_ha.count, sizeof(HassSensor), CompareSensors);
     FillList();
+    WCHAR url[HASS_URL_MAX];
+    GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
+    if (IsPlainHttp(url)) {
+        SetStatus(kHttpWarning, TRUE);   /* worth more than the count */
+        return;
+    }
     WCHAR msg[96];
     if (g_ha.count == 0)
         lstrcpyW(msg, L"Connected, but Home Assistant has no illuminance sensor.");
@@ -210,13 +259,26 @@ static void OnListResult(ListResult *res)
 static void Save(void)
 {
     Settings *s = g_ha.settings;
-    GetWindowTextW(g_ha.url, s->haUrl, HASS_URL_MAX);
-    WCHAR typed[HASS_TOKEN_MAX];
-    GetWindowTextW(g_ha.token, typed, HASS_TOKEN_MAX);
-    if (typed[0])
-        WideCharToMultiByte(CP_UTF8, 0, typed, -1, s->haToken, HASS_TOKEN_MAX, NULL, NULL);
-    SecureZeroMemory(typed, sizeof(typed));
+    WCHAR url[HASS_URL_MAX];
+    GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
+    BOOL urlChanged = !SameUrl(url, s->haUrl);
+    char token[HASS_TOKEN_MAX];
+    const WCHAR *problem = url[0] ? CurrentToken(url, token, HASS_TOKEN_MAX) : NULL;
+    if (problem) {
+        SecureZeroMemory(token, sizeof(token));
+        SetStatus(problem, TRUE);
+        return;   /* never store a token next to a URL it was not given for */
+    }
+    lstrcpynW(s->haUrl, url, HASS_URL_MAX);
+    SecureZeroMemory(s->haToken, sizeof(s->haToken));   /* no tail of a longer old token */
+    lstrcpynA(s->haToken, token, HASS_TOKEN_MAX);
+    SecureZeroMemory(token, sizeof(token));
     int sel = (int)SendMessageW(g_ha.list, LB_GETCURSEL, 0, 0);
+    if (sel < 0 && urlChanged) {
+        /* The chosen sensor belonged to the old server. */
+        s->haSensor[0] = L'\0';
+        s->haSensorLabel[0] = L'\0';
+    }
     if (sel >= 0) {
         int i = (int)SendMessageW(g_ha.list, LB_GETITEMDATA, sel, 0);
         const HassSensor *hs = &g_ha.sensors[i];
@@ -360,6 +422,7 @@ static void CreateControls(void)
     FieldRect(0, &f);
     g_ha.url = MakeChild(L"EDIT", g_ha.settings->haUrl, ES_AUTOHSCROLL | WS_TABSTOP, IDC_URL,
                          f.left + 8, f.top + 7, f.right - f.left - 16, 18);
+    SendMessageW(g_ha.url, EM_LIMITTEXT, HASS_URL_MAX - 1, 0);   /* longer would be cut silently */
 
     const WCHAR *tokenLabel = g_ha.settings->haToken[0]
         ? L"Access token (one is saved; leave empty to keep it)"
@@ -368,6 +431,7 @@ static void CreateControls(void)
     FieldRect(1, &f);
     g_ha.token = MakeChild(L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP, IDC_TOKEN,
                            f.left + 8, f.top + 7, f.right - f.left - 16, 18);
+    SendMessageW(g_ha.token, EM_LIMITTEXT, HASS_TOKEN_MAX - 1, 0);
 
     g_ha.connect = MakeChild(L"BUTTON", L"Connect", BS_OWNERDRAW | WS_TABSTOP, IDC_CONNECT,
                              HASS_M, ConnectTop(), DLG_BTN_W + 16, DLG_BTN_H);
@@ -448,20 +512,36 @@ static LRESULT CALLBACK HassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             /* Repaint the focus ring as the focus moves between fields. */
             if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)
                 InvalidateRect(hwnd, NULL, FALSE);
+            if (LOWORD(wParam) == IDC_URL && HIWORD(wParam) == EN_CHANGE) {
+                WCHAR url[HASS_URL_MAX];
+                GetWindowTextW(g_ha.url, url, HASS_URL_MAX);
+                /* A list from another address must not be saved with this one. */
+                if (g_ha.count > 0) {
+                    ClearList();
+                    SetStatus(L"Connect to list the sensors of this address.", FALSE);
+                }
+                if (IsPlainHttp(url))
+                    SetStatus(kHttpWarning, TRUE);
+            }
             return 0;
         }
         break;
 
     case WM_APP_HASS_LIST:
-        OnListResult((ListResult *)lParam);
+        OnListResult((DWORD)wParam, (ListResult *)lParam);
         return 0;
 
     case WM_LBUTTONDOWN:
         BeginWindowDrag(hwnd);   /* anywhere that is not a control moves the window */
         return 0;
 
-    case WM_DESTROY:
-        g_ha.gen++;   /* a list still on its way is dropped by its worker or here */
+    case WM_DESTROY: {
+        /* A result posted before the window went away would be dropped with
+           its memory; take it out of the queue and free it. */
+        MSG pending;
+        while (PeekMessageW(&pending, hwnd, WM_APP_HASS_LIST, WM_APP_HASS_LIST, PM_REMOVE))
+            free((ListResult *)pending.lParam);
+        g_ha.gen++;   /* a list still on its way is dropped by its worker */
         g_ha.busy = FALSE;
         if (g_ha.font) DeleteObject(g_ha.font);
         if (g_ha.fontTitle) DeleteObject(g_ha.fontTitle);
@@ -470,6 +550,7 @@ static LRESULT CALLBACK HassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         g_ha.surface = NULL;
         g_ha.hwnd = NULL;
         return 0;
+    }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -515,8 +596,14 @@ void UI_ShowHomeAssistant(HWND hwndOwner, Settings *s, HWND notify)
     g_ha.hwnd = CreateWindowExW(WS_EX_APPWINDOW, HASS_CLASS, L"Home Assistant",
                                 WS_POPUP | WS_CLIPCHILDREN, x, y, HASS_WIDTH, HASS_HEIGHT,
                                 hwndOwner, NULL, g_uiInst, NULL);
-    if (!g_ha.hwnd)
+    if (!g_ha.hwnd) {
+        DeleteObject(g_ha.font);
+        DeleteObject(g_ha.fontTitle);
+        DeleteObject(g_ha.surface);
+        g_ha.font = g_ha.fontTitle = NULL;
+        g_ha.surface = NULL;
         return;
+    }
     DWORD round = 2;   /* DWMWCP_ROUND; ignored before Windows 11 */
     DwmSetWindowAttribute(g_ha.hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &round, sizeof(round));
     CreateControls();

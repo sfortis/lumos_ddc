@@ -308,6 +308,8 @@ int Json_GetString(const char *js, const JsonToken *t, char *out, int cap)
             break;
         default:  cp = (unsigned char)e; break;   /* \" \\ \/ */
         }
+        if (cp == 0)
+            return -1;   /* \u0000 would end the C string early and hide the rest */
         len = PutUtf8(out, len, cap, cp);
         if (len < 0) return -1;
     }

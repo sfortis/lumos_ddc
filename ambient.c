@@ -13,6 +13,15 @@ static double LogLux(double lux)
     return log10((lux < 0 ? 0 : lux) + AMBIENT_LUX_OFFSET);
 }
 
+/* Lux beyond this is no room light (direct sunlight is about 100 000). */
+#define AMBIENT_LUX_MAX 1e6
+
+static double ClampLux(double lux)
+{
+    if (!(lux >= 0)) return 0;   /* also NaN */
+    return lux > AMBIENT_LUX_MAX ? AMBIENT_LUX_MAX : lux;
+}
+
 static int ClampLevel(int v)
 {
     return v < 0 ? 0 : (v > 100 ? 100 : v);
@@ -70,7 +79,7 @@ static void InsertSorted(AmbientCurve *c, double lux, int level)
 
 void Ambient_Learn(AmbientCurve *c, double lux, int level)
 {
-    if (lux < 0) lux = 0;
+    lux = ClampLux(lux);   /* the same range Ambient_Parse reads back */
     level = ClampLevel(level);
     if (c->count == 0)
         Ambient_DefaultCurve(c);
@@ -143,9 +152,22 @@ int Ambient_Format(const AmbientCurve *c, char *out, int cap)
     return len;
 }
 
+static double FromLog(double x)
+{
+    double lux = pow(10.0, x) - AMBIENT_LUX_OFFSET;
+    return lux < 0 ? 0 : lux;
+}
+
+double Ambient_LatestLux(const AmbientFilter *f)
+{
+    if (!f->primed)
+        return 0;
+    return FromLog(f->pending ? f->pendingLog : f->logLux);
+}
+
 double Ambient_Smooth(AmbientFilter *f, double lux)
 {
-    double x = LogLux(lux);
+    double x = LogLux(ClampLux(lux));
     if (!f->primed) {
         f->primed = 1;
         f->logLux = x;
@@ -164,8 +186,7 @@ double Ambient_Smooth(AmbientFilter *f, double lux)
             f->pendingLog = x;
         }
     }
-    double smoothed = pow(10.0, f->logLux) - AMBIENT_LUX_OFFSET;
-    return smoothed < 0 ? 0 : smoothed;
+    return FromLog(f->logLux);
 }
 
 void Ambient_GateReset(AmbientGate *g)
