@@ -85,24 +85,31 @@ static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
 #define IDLE_TIMER_ID       0xB102
 #define IDLE_TICK_MS        2000
 
-/* Auto brightness from a Home Assistant illuminance sensor. Indoor sensors
-   report every few minutes at best, so polling faster gains nothing. After
-   AUTO_OFFLINE_AFTER failed polls in a row the schedule takes over until
+/* Auto brightness from a Home Assistant illuminance sensor. The FP2 reports
+   a lamp within two seconds, so the poll interval sets how fast a change is
+   seen; 15 s is a GET of a few hundred bytes on the LAN. After
+   AUTO_OFFLINE_AFTER failed polls in a row (90 s) the schedule takes over until
    Home Assistant answers again. The learned curve is written to config.ini
    AUTO_SAVE_DELAY_MS after the last manual change, so a run of wheel notches
    writes once. */
 #define AUTO_TIMER_ID       0xB105
-#define AUTO_POLL_MS        30000
-#define AUTO_OFFLINE_AFTER  3
+#define AUTO_POLL_MS        15000
+#define AUTO_OFFLINE_AFTER  6
 #define AUTO_SAVE_TIMER_ID  0xB106
 #define AUTO_SAVE_DELAY_MS  3000
 /* A large change in the light is applied once a second reading confirms it.
    That reading is taken AUTO_CONFIRM_MS after the first instead of at the
-   next regular poll, so a lamp switched on shows within about 10 to 40 s.
+   next regular poll, so a lamp switched on shows within about 5 to 20 s.
    Polling faster all the time would sample a noisy sensor more often and
    change the level for nothing more often. */
 #define AUTO_CONFIRM_TIMER_ID 0xB107
-#define AUTO_CONFIRM_MS       10000
+/* A change from the sensor is not applied in one jump: the level moves 1%
+   every AUTO_RAMP_MS, so the screens fade instead of snapping (85 to 40 takes
+   4.5 s). Each step writes only the monitors whose level changes, on the UI
+   thread like the popup drag, which writes as often as every 60 ms. */
+#define AUTO_RAMP_TIMER_ID    0xB108
+#define AUTO_RAMP_MS          100
+#define AUTO_CONFIRM_MS       3000    /* the FP2 finishes a lamp ramp in about 2 s */
 
 static HINSTANCE    g_hInst;
 static HWND         g_hwndHidden;    /* Hidden top-level window (receives broadcasts + notifications) */
@@ -183,6 +190,7 @@ static BOOL Auto_Owns(void);
 static void Auto_Apply(BOOL force);
 static void Auto_Learn(void);
 static void Auto_Configure(void);
+static void Auto_StopRamp(void);
 
 /* A monitor's range changed in the popup. Save it, then put every monitor
    back on the current master level so the change shows at once: matching two
@@ -967,6 +975,7 @@ static void Schedule_Suspend(void)
    here: it supersedes the idle level and suspends the schedule. */
 static void ManualChange(void)
 {
+    Auto_StopRamp();        /* the user's level wins over a fade in progress */
     g_idleDimmed = FALSE;   /* the user just set a level; do not restore over it */
     /* Under auto brightness the change becomes a curve point. The schedule is
        not suspended then: it is not running, and a suspension would stop it
@@ -1044,6 +1053,7 @@ static void Idle_Dim(void)
     }
     if (block != DIMBLOCK_NONE)
         return;
+    Auto_StopRamp();
     if (g_masterTarget < 0)
         g_masterTarget = MasterTargetFromMonitors();
     g_idleDimmed = TRUE;
@@ -1108,6 +1118,7 @@ static BOOL          g_autoOnline;      /* Home Assistant answered recently */
 static BOOL          g_autoNoReading;   /* the last answer was "unavailable" or "unknown" */
 static BOOL          g_autoWasEnabled;  /* haAutoEnabled when Auto_Configure last ran */
 static int           g_autoCurvePoints; /* learned points then, to notice a reset */
+static int           g_autoRampTarget = -1; /* level a fade is moving to, -1 for none */
 
 static BOOL Auto_Configured(void)
 {
@@ -1159,7 +1170,7 @@ static void Auto_PublishInfo(void)
     info.lux = g_autoRawLux;
     /* A change is seen but not applied yet: held for confirmation, or a small
        one waiting for the readings to agree. */
-    info.adjusting = g_autoFilter.pending || g_autoGate.count > 0;
+    info.adjusting = g_autoFilter.pending || g_autoGate.count > 0 || g_autoRampTarget >= 0;
     UI_SetAutoInfo(g_hwndPopup, &info);
 }
 
@@ -1200,8 +1211,45 @@ static void Auto_Poll(void)
     g_autoBusy = TRUE;
 }
 
+static void Auto_StopRamp(void)
+{
+    if (g_autoRampTarget < 0)
+        return;
+    KillTimer(g_hwndHidden, AUTO_RAMP_TIMER_ID);
+    g_autoRampTarget = -1;
+}
+
+/* One 1% step of a fade. The popup is refreshed only when the fade ends: a
+   refresh per step would make a screen reader speak every percent. */
+static void Auto_RampStep(void)
+{
+    if (g_autoRampTarget < 0)
+        return;   /* a tick queued before the timer was killed */
+    if (g_masterTarget < 0 || !Auto_Owns() || g_idleDimmed) {
+        /* Stopped halfway (Home Assistant went offline): the popup and the
+           panel show where the fade stopped, not where it started. */
+        Auto_StopRamp();
+        UI_RefreshPopup(g_hwndPopup, &g_monitors);
+        Auto_PublishInfo();
+        return;
+    }
+    int from = g_masterTarget;
+    if (from != g_autoRampTarget) {
+        int to = from + (g_autoRampTarget > from ? 1 : -1);
+        g_masterTarget = to;
+        Monitor_StepAllBrightness(&g_monitors, from, to);
+    }
+    if (g_masterTarget == g_autoRampTarget) {
+        Auto_StopRamp();
+        UI_RefreshPopup(g_hwndPopup, &g_monitors);
+        Auto_PublishInfo();
+    }
+}
+
 /* Move the monitors to the curve's level for the current light. force skips
-   the gate, for a restore after a wake or an idle dim. */
+   the gate and the fade, for a restore after a wake or an idle dim, when the
+   displays may have reset to full brightness and a fade from there would
+   only show the wrong level for longer. */
 static void Auto_Apply(BOOL force)
 {
     if (!Auto_Owns() || g_autoLux < 0 || g_idleDimmed)
@@ -1211,10 +1259,29 @@ static void Auto_Apply(BOOL force)
         Ambient_GateReset(&g_autoGate);
     if (!Ambient_Decide(&g_autoGate, target))
         return;
-    DbgLog("auto: %.1f lx -> %d%%", g_autoLux, target);
-    g_masterTarget = target;
-    TIMED("auto: SetAllBrightness", Monitor_SetAllBrightness(&g_monitors, target));
-    UI_RefreshPopup(g_hwndPopup, &g_monitors);
+    DbgLog("auto: %.1f lx -> %d%%%s", g_autoLux, target, force ? " (at once)" : "");
+    if (force || g_masterTarget < 0) {
+        Auto_StopRamp();
+        g_masterTarget = target;
+        TIMED("auto: SetAllBrightness", Monitor_SetAllBrightness(&g_monitors, target));
+        UI_RefreshPopup(g_hwndPopup, &g_monitors);
+        Auto_PublishInfo();
+        return;
+    }
+    if (g_autoRampTarget < 0 && g_masterTarget != target) {
+        /* The first step writes every monitor, so one set by its own slider
+           joins the fade instead of jumping when its mapped level next moves.
+           Nothing is written when the level is already right, so a level set
+           on one monitor alone survives a reconfigure. */
+        g_masterTarget += (target > g_masterTarget) ? 1 : -1;
+        Monitor_SetAllBrightness(&g_monitors, g_masterTarget);
+        SetTimer(g_hwndHidden, AUTO_RAMP_TIMER_ID, AUTO_RAMP_MS, NULL);
+    }
+    g_autoRampTarget = target;   /* a fade in progress just changes course */
+    if (g_masterTarget == target) {
+        Auto_StopRamp();
+        UI_RefreshPopup(g_hwndPopup, &g_monitors);
+    }
     Auto_PublishInfo();
 }
 
@@ -1247,6 +1314,7 @@ static void Auto_OnReading(AutoReading *r)
         DbgLog("auto: %d failed polls (status %d), the schedule takes over",
                g_autoFailures, (int)r->status);
         g_autoOnline = FALSE;
+        Auto_StopRamp();
         g_scheduleLastApplied = -1;
         Schedule_ApplyNow();
     }
@@ -1288,6 +1356,7 @@ static void Auto_Configure(void)
     Ambient_GateReset(&g_autoGate);
     KillTimer(g_hwndHidden, AUTO_TIMER_ID);
     KillTimer(g_hwndHidden, AUTO_CONFIRM_TIMER_ID);
+    Auto_StopRamp();
     if (Auto_Configured()) {
         /* Assume Home Assistant answers until polls say otherwise, so the
            schedule does not jump in for the first seconds. */
@@ -1526,6 +1595,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Idle_Tick();
         } else if (wParam == AUTO_TIMER_ID) {
             Auto_Poll();
+        } else if (wParam == AUTO_RAMP_TIMER_ID) {
+            Auto_RampStep();
         } else if (wParam == AUTO_CONFIRM_TIMER_ID) {
             KillTimer(hwnd, AUTO_CONFIRM_TIMER_ID);
             Auto_Poll();

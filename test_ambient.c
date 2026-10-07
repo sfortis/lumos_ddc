@@ -1,6 +1,7 @@
 #include "ambient.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } } while (0)
@@ -117,7 +118,7 @@ int main(void)
     s = Ambient_Smooth(&lamp, 77);
     CHECK(s < 10, "one large reading is held");
     s = Ambient_Smooth(&lamp, 77);
-    CHECK(s > 70 && s < 80, "a second one confirms it: the 8 to 77 lx lamp is followed after 30 s");
+    CHECK(s > 70 && s < 80, "a second one confirms it: the 8 to 77 lx lamp is followed");
     for (int i = 0; i < 60; i++) s = Ambient_Smooth(&lamp, 77);
     CHECK(s > 75 && s < 79, "and stays there");
     AmbientFilter spike = { 0 };
@@ -130,23 +131,60 @@ int main(void)
     Ambient_Smooth(&flip, 300);
     s = Ambient_Smooth(&flip, 0.5);
     CHECK(s < 10, "an opposite second reading does not confirm the first");
+    AmbientFilter ramp = { 0 };
+    Ambient_Smooth(&ramp, 8);
+    Ambient_Smooth(&ramp, 50);   /* caught halfway through the lamp's ramp */
+    Ambient_Smooth(&ramp, 77);   /* not close to 50: held again, 3 s more */
+    CHECK(ramp.pending, "the final reading after a mid-ramp one is held once more");
+    s = Ambient_Smooth(&ramp, 77);
+    CHECK(s > 75 && s < 79, "and the next one confirms it");
+    AmbientFilter spike8 = { 0 };
+    for (int i = 0; i < 20; i++) Ambient_Smooth(&spike8, 0);
+    Ambient_Smooth(&spike8, 8);     /* dark-room noise: not a large change in lux */
+    CHECK(!spike8.pending, "0 to 8 lx does not take the confirmed path");
+    s = Ambient_Smooth(&spike8, 300);
+    s = Ambient_Smooth(&spike8, 8);
+    CHECK(s < 10, "a spike after noise is not confirmed by the noise");
+    AmbientFilter step = { 0 };
+    for (int i = 0; i < 20; i++) Ambient_Smooth(&step, 77);
+    Ambient_Smooth(&step, 130);
+    s = Ambient_Smooth(&step, 130);
+    CHECK(s > 125 && s < 135, "a medium step (77 to 130 lx) takes the confirmed path");
 
-    /* The noisy FP2: random 0 or 5 lx for 16 hours of 30 s polls changes the
-       level rarely (about 12 times in the simulation). */
+    /* The noisy FP2: random 0 or 5 lx for 16 hours of 15 s polls changes the
+       level rarely (about 23 times in the simulation). */
     Ambient_DefaultCurve(&c);
     AmbientFilter noisy = { 0 };
     AmbientGate gate;
     Ambient_GateReset(&gate);
     unsigned seed = 7;
     int changes = 0;
-    for (int i = 0; i < 2000; i++) {
+    for (int i = 0; i < 3840; i++) {
         seed = seed * 1103515245u + 12345u;
         double raw = ((seed >> 16) % 3 == 0) ? 5 : 0;
         if (Ambient_Decide(&gate, Ambient_LevelFor(&c, Ambient_Smooth(&noisy, raw))) && i > 40)
             changes++;
     }
     snprintf(msg, sizeof msg, "noisy sensor changed the level %d times in 16 h", changes);
-    CHECK(changes <= 20, msg);
+    CHECK(changes <= 35, msg);
+
+    /* 0, 5 or 8 lx at random: the level moves in small gated steps only,
+       never in a jump. */
+    AmbientFilter noisy8 = { 0 };
+    Ambient_GateReset(&gate);
+    int biggest = 0, last = -1;
+    for (int i = 0; i < 3840; i++) {
+        seed = seed * 1103515245u + 12345u;
+        unsigned k = (seed >> 16) % 3;
+        double raw = k == 0 ? 0 : k == 1 ? 5 : 8;
+        if (Ambient_Decide(&gate, Ambient_LevelFor(&c, Ambient_Smooth(&noisy8, raw)))) {
+            if (last >= 0 && i > 40 && abs(gate.lastApplied - last) > biggest)
+                biggest = abs(gate.lastApplied - last);
+            last = gate.lastApplied;
+        }
+    }
+    snprintf(msg, sizeof msg, "0/5/8 lx noise moved the level by %d at most", biggest);
+    CHECK(biggest < AMBIENT_BIG, msg);
 
     /* Gate */
     AmbientGate g2;

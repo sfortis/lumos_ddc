@@ -174,12 +174,20 @@ double Ambient_Smooth(AmbientFilter *f, double lux)
         f->pending = 0;
     } else {
         double d = x - f->logLux;
-        if (fabs(d) < AMBIENT_STEP) {
+        /* A large change must be large on the log scale and in lux: 0 to 8 lx
+           is 0.255 on the scale, but it is the noise of a dark room. */
+        int large = fabs(d) >= AMBIENT_STEP &&
+                    fabs(ClampLux(lux) - FromLog(f->logLux)) >= AMBIENT_MIN_JUMP_LUX;
+        if (!large) {
             f->pending = 0;
             f->logLux += AMBIENT_SLOW * d;
         } else if (f->pending && (f->pendingLog - f->logLux) * d > 0 &&
                    fabs(x - f->pendingLog) < AMBIENT_STEP / 2) {
-            f->logLux = (x + f->pendingLog) / 2;   /* confirmed: follow at once */
+            /* Confirmed: a second reading close to the first. The newer one
+               wins. A first reading caught halfway through a lamp's ramp (the
+               FP2 reports 16, 50, 77 lx a second apart) is not close to the
+               final one; it is held again below and confirmed by the next. */
+            f->logLux = x;
             f->pending = 0;
         } else {
             f->pending = 1;                         /* hold until the next reading */

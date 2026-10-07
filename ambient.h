@@ -58,8 +58,18 @@ int Ambient_Format(const AmbientCurve *c, char *out, int cap);
 
 /* Smoothing and gating, tuned by simulating the Living Room FP2, which
  * reports 0, 5 or 8 lx at random while the room is dark. Over 16 hours of
- * 30 s polls the level changes 12 times for 0/5 noise and 40 times for
- * 0/5/8 noise, while a lamp switched on (8 to 77 lx) shows after 30 s.
+ * 15 s polls the level changes about 23 times for 0/5 noise and 65 times
+ * for 0/5/8 noise, in steps smaller than AMBIENT_BIG. A lamp switched on (8 to 77 lx) is applied after 11 s on
+ * average and 19 s at worst, and a step from 77 to 130 lx within 45 s.
+ * A threshold of 0.35 took up to 210 s for that step, because it went
+ * through the slow path; below 0.2 the noise itself starts to take the
+ * confirmed path (0.17 gave 660 changes in 16 h).
+ *
+ * A large change must also be AMBIENT_MIN_JUMP_LUX in lux, so the 0 to 8 lx
+ * noise of a dark room always takes the slow path and moves the level in
+ * small steps instead of a jump. The confirming reading must be close to the
+ * held one, so a spike after noise is not confirmed by it; a reading caught
+ * halfway through a lamp's ramp is held again and confirmed 3 s later.
  *
  * A reading less than AMBIENT_STEP from the smoothed value (on the log scale)
  * is noise or a slow drift and moves it by AMBIENT_SLOW of the distance. A
@@ -67,7 +77,8 @@ int Ambient_Format(const AmbientCurve *c, char *out, int cap);
  * and close to it; then the value jumps to the pair. A real change persists
  * and a noise spike does not, which tells them apart where their sizes are
  * alike. */
-#define AMBIENT_STEP 0.35
+#define AMBIENT_STEP 0.2
+#define AMBIENT_MIN_JUMP_LUX 15.0
 #define AMBIENT_SLOW 0.08
 
 typedef struct {

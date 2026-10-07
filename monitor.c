@@ -588,6 +588,17 @@ BOOL Monitor_SetAllBrightness(MonitorList *ml, int percent)
     return allOk;
 }
 
+void Monitor_StepAllBrightness(MonitorList *ml, int from, int to)
+{
+    for (int i = 0; i < ml->count; i++) {
+        BrightMonitor *mon = &ml->monitors[i];
+        int a = BrightMap_Level(from, mon->rangeLo, mon->rangeHi);
+        int b = BrightMap_Level(to, mon->rangeLo, mon->rangeHi);
+        if (a != b)
+            Monitor_SetBrightness(mon, (DWORD)b);
+    }
+}
+
 int Monitor_GetPercent(const BrightMonitor *mon)
 {
     DWORD range = mon->brightnessMax - mon->brightnessMin;

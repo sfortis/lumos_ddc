@@ -78,6 +78,12 @@ int Monitor_TrackUnanswered(MonitorList *fresh, const MonitorList *prev, unsigne
    handle after sleep, for example). */
 BOOL Monitor_SetAllBrightness(MonitorList *ml, int percent);
 
+/* Move the All Monitors level from one value to the next, writing only the
+   monitors whose level changes on the way; with a wide range a 1% step of the
+   master often leaves a monitor where it is. The monitors must be at the
+   from level already. */
+void Monitor_StepAllBrightness(MonitorList *ml, int from, int to);
+
 /* Adjust active monitor brightness by delta (-10 or +10 etc) */
 void Monitor_AdjustActive(MonitorList *ml, int delta);
 
