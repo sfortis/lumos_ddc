@@ -1,5 +1,6 @@
 #include "presets.h"
 #include "brightmap.h"
+#include "secret.h"
 #include <shlobj.h>
 #include <stdio.h>
 
@@ -133,6 +134,43 @@ static void LoadRanges(Settings *s)
     s->rangeNewHi = his[n];
 }
 
+/* [HomeAssistant]: Url, Token (DPAPI, base64), Sensor, SensorLabel,
+   AutoBrightness, Curve ("lux:level,..."). */
+static void LoadHomeAssistant(Settings *s)
+{
+    static const WCHAR sec[] = L"HomeAssistant";
+    WCHAR buf[2048];
+    GetPrivateProfileStringW(sec, L"Url", L"", s->haUrl, HASS_URL_MAX, s->iniPath);
+    GetPrivateProfileStringW(sec, L"Token", L"", buf, 2048, s->iniPath);
+    if (!Secret_Unprotect(buf, s->haToken, HASS_TOKEN_MAX))
+        s->haToken[0] = '\0';   /* from another account or machine: ask again */
+    SecureZeroMemory(buf, sizeof(buf));
+    GetPrivateProfileStringW(sec, L"Sensor", L"", s->haSensor, HASS_ENTITY_MAX, s->iniPath);
+    GetPrivateProfileStringW(sec, L"SensorLabel", L"", s->haSensorLabel, 200, s->iniPath);
+    s->haAutoEnabled = (BOOL)GetPrivateProfileIntW(sec, L"AutoBrightness", 0, s->iniPath);
+    GetPrivateProfileStringW(sec, L"Curve", L"", buf, 256, s->iniPath);
+    char curve[256];
+    WideCharToMultiByte(CP_UTF8, 0, buf, -1, curve, sizeof curve, NULL, NULL);
+    Ambient_Parse(curve, &s->haCurve);
+}
+
+static void SaveHomeAssistant(Settings *s)
+{
+    static const WCHAR sec[] = L"HomeAssistant";
+    WCHAR buf[2048];
+    WritePrivateProfileStringW(sec, L"Url", s->haUrl, s->iniPath);
+    if (Secret_Protect(s->haToken, buf, 2048))
+        WritePrivateProfileStringW(sec, L"Token", buf, s->iniPath);
+    WritePrivateProfileStringW(sec, L"Sensor", s->haSensor, s->iniPath);
+    WritePrivateProfileStringW(sec, L"SensorLabel", s->haSensorLabel, s->iniPath);
+    WritePrivateProfileStringW(sec, L"AutoBrightness", s->haAutoEnabled ? L"1" : L"0", s->iniPath);
+    char curve[256];
+    if (Ambient_Format(&s->haCurve, curve, sizeof curve) < 0)
+        curve[0] = '\0';
+    MultiByteToWideChar(CP_UTF8, 0, curve, -1, buf, 256);
+    WritePrivateProfileStringW(sec, L"Curve", buf, s->iniPath);
+}
+
 void Settings_Load(Settings *s)
 {
     WCHAR buf[4096];
@@ -199,6 +237,7 @@ void Settings_Load(Settings *s)
     }
 
     LoadRanges(s);
+    LoadHomeAssistant(s);
 
     /* Load schedule enabled flag */
     s->scheduleEnabled = (BOOL)GetPrivateProfileIntW(L"Settings", L"ScheduleEnabled", 0, s->iniPath);
@@ -271,6 +310,8 @@ void Settings_Save(Settings *s)
         wsprintfW(val, L"%d,%d", s->rangeLo[i], s->rangeHi[i]);
         WritePrivateProfileStringW(L"Ranges", s->rangeNames[i], val, s->iniPath);
     }
+
+    SaveHomeAssistant(s);
 
     /* Save schedule enabled flag */
     WritePrivateProfileStringW(L"Settings", L"ScheduleEnabled",

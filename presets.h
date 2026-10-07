@@ -5,6 +5,8 @@
 #include "monitor.h"
 #include "schedule.h"
 #include "hotkey.h"
+#include "hass.h"
+#include "ambient.h"
 
 #define MAX_PRESETS 10
 
@@ -41,6 +43,15 @@ typedef struct {
     int           idleDimPercent;   /* level held while the session is idle (0-100) */
     int           idleDimMinutes;   /* idle time before dimming */
     Hotkey        hotkeys[HOTKEY_COUNT];   /* indexed by HOTKEY_BRIGHTEN etc. */
+    /* Home Assistant auto brightness, from [HomeAssistant]. The token is in
+       clear only in memory; config.ini holds it encrypted (secret.c). An empty
+       haCurve means the default curve. */
+    WCHAR         haUrl[HASS_URL_MAX];
+    char          haToken[HASS_TOKEN_MAX];
+    WCHAR         haSensor[HASS_ENTITY_MAX];   /* entity_id, empty for none */
+    WCHAR         haSensorLabel[200];          /* "Living Room: FP2 Light Level", for display */
+    BOOL          haAutoEnabled;
+    AmbientCurve  haCurve;
 } Settings;
 
 /* Initialize settings path and load from INI */
