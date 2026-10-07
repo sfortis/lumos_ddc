@@ -58,11 +58,13 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: a slider and a maximum for each monitor, and the All Monitors slider" />
+  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: a slider and a maximum for each monitor, the All Monitors slider, and the auto brightness panel with the light sensor reading and the learned curve" />
   &nbsp;&nbsp;
-  <img src="screenshots/02-context-menu.png" width="242" alt="Dark context menu: presets, re-scan, Settings, autostart, schedule, idle dim, About" />
+  <img src="screenshots/02-context-menu.png" width="220" alt="Dark context menu in three groups: presets; auto brightness, schedule and idle dim; re-scan, Settings and autostart; then About and Exit" />
 </p>
 <p align="center">
+  <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, schedule, Home Assistant, monitor minimums and presets" />
+  &nbsp;&nbsp;
   <img src="screenshots/03-osd.png" width="248" alt="On-screen display overlay with percentage and progress bar" />
 </p>
 
@@ -152,6 +154,10 @@ If you run [Home Assistant](https://www.home-assistant.io/) and have an illumina
 3. Enter the address of your server (for example `https://homeassistant.local:8123`) and paste the token, then press **Connect**.
 4. Lumos lists every sensor whose device class is illuminance, with its area and its current reading. Choose the sensor in the room of this PC and press **Save**.
 5. Turn on **Auto brightness** in Settings, or choose **Auto Brightness (Light Sensor)** in the tray menu. That menu item appears once a sensor is chosen.
+
+<p align="center">
+  <img src="screenshots/05-home-assistant.png" width="400" alt="Home Assistant window: the server address, the access token field, and the list of illuminance sensors with their areas and readings" />
+</p>
 
 The Home Assistant window stays open when you click elsewhere, so you can copy the token from a browser. Cancel, Save and `Esc` close it.
 
