@@ -5,14 +5,15 @@
 #include "monitor.h"
 #include "presets.h"
 
-/* Dark theme colors (0xRRGGBB) */
-#define CLR_BG          0x1E1E2E   /* #1e1e2e */
-#define CLR_TEXT        0xCDD6F4   /* #cdd6f4 */
-#define CLR_ACCENT      0x89B4FA   /* #89b4fa */
-#define CLR_TRACK       0x313244   /* #313244 */
-#define CLR_SURFACE     0x2D2E3E   /* #2d2e3e */
-#define CLR_SUBTEXT     0x9EA0B0   /* #9ea0b0 */
-#define CLR_ERROR       0xF38BA8   /* #f38ba8, a hotkey that could not be used */
+/* Dark theme colors (0xRRGGBB): neutral greys with a light orange accent.
+   Every window takes its colors from here, the Home Assistant window too. */
+#define CLR_BG          0x1F1F1F   /* #1f1f1f */
+#define CLR_TEXT        0xE6E6E6   /* #e6e6e6 */
+#define CLR_ACCENT      0xFFB86C   /* #ffb86c */
+#define CLR_TRACK       0x3A3A3A   /* #3a3a3a */
+#define CLR_SURFACE     0x2B2B2B   /* #2b2b2b */
+#define CLR_SUBTEXT     0xA0A0A0   /* #a0a0a0 */
+#define CLR_ERROR       0xFF6B6B   /* #ff6b6b, a hotkey that could not be used */
 
 /* Popup dimensions */
 #define POPUP_WIDTH     320
