@@ -71,7 +71,22 @@ typedef struct {
     WCHAR  errorText[64];
     Settings *settings;
     HWND   owner;
+
+    /* The rows scroll between the fixed header and footer when they do not fit
+       the work area: a laptop at 1366x768, or 1920x1080 at 150%, has about
+       700 pixels, and two monitors already make the rows taller than that. */
+    int    viewH;          /* height of the rows area on screen */
+    int    scroll;         /* pixels of the rows scrolled out at the top */
+    BOOL   thumbDrag;      /* the scroll bar thumb is being dragged */
+    int    thumbDragY, thumbDragScroll;
+    DWORD  lastWheelScroll;  /* GetTickCount of the last wheel notch that scrolled */
 } SetEditData;
+
+#define SET_SCROLLBAR_W 10   /* hit width at the right edge; the bar drawn is 4 */
+
+/* A wheel notch this soon after one that scrolled keeps scrolling, even when
+   the rows moving under the cursor bring a number control beneath it. */
+#define SET_WHEEL_LATCH_MS 600
 
 static SetEditData g_set;
 
@@ -197,20 +212,78 @@ static int SetRowHeight(SetRow *r)
     return SET_ROW_H;
 }
 
-static int SetHeight(SetEditData *d)
+static int SetContentHeight(SetEditData *d)
 {
-    int h = SET_HEADER_H + SET_FOOTER_H;
+    int h = 0;
     for (int i = 0; i < d->rowCount; i++)
         h += SetRowHeight(&d->rows[i]);
     return h;
 }
 
+/* The window: header, the visible part of the rows, footer. */
+static int SetHeight(SetEditData *d)
+{
+    return SET_HEADER_H + d->viewH + SET_FOOTER_H;
+}
+
+static int SetMaxScroll(SetEditData *d)
+{
+    int m = SetContentHeight(d) - d->viewH;
+    return m > 0 ? m : 0;
+}
+
+static void SetScrollTo(SetEditData *d, int scroll)
+{
+    int m = SetMaxScroll(d);
+    d->scroll = scroll < 0 ? 0 : scroll > m ? m : scroll;
+}
+
+/* Top of a row on screen, after scrolling; outside the rows area when the
+   row is scrolled out. */
 static int SetRowTop(SetEditData *d, int row)
 {
-    int top = SET_HEADER_H;
+    int top = SET_HEADER_H - d->scroll;
     for (int i = 0; i < row; i++)
         top += SetRowHeight(&d->rows[i]);
     return top;
+}
+
+static BOOL SetRowVisible(SetEditData *d, int row)
+{
+    int top = SetRowTop(d, row);
+    return top >= SET_HEADER_H && top + SetRowHeight(&d->rows[row]) <= SET_HEADER_H + d->viewH;
+}
+
+/* Scroll just enough to show a row, with the section title above it when it
+   is the first row of its section. Cancel and Save are always shown. */
+static void SetEnsureVisible(SetEditData *d, int row)
+{
+    if (row < 0 || row >= d->rowCount)
+        return;
+    int top = SetRowTop(d, row) + d->scroll - SET_HEADER_H;   /* in content coordinates */
+    if (row > 0 && d->rows[row - 1].kind == SET_SECTION)
+        top -= SetRowHeight(&d->rows[row - 1]);
+    int bottom = SetRowTop(d, row) + d->scroll - SET_HEADER_H + SetRowHeight(&d->rows[row]);
+    if (top < d->scroll)
+        SetScrollTo(d, top);
+    else if (bottom > d->scroll + d->viewH)
+        SetScrollTo(d, bottom - d->viewH);
+}
+
+/* The scroll bar track and thumb, in window coordinates; FALSE when the rows
+   fit and there is no bar. */
+static BOOL SetScrollbarRects(SetEditData *d, RECT *track, RECT *thumb)
+{
+    int content = SetContentHeight(d), m = SetMaxScroll(d);
+    if (m <= 0)
+        return FALSE;
+    SetRect(track, SET_WIDTH - 7, SET_HEADER_H + 2, SET_WIDTH - 3, SET_HEADER_H + d->viewH - 2);
+    int trackH = track->bottom - track->top;
+    int thumbH = trackH * d->viewH / content;
+    if (thumbH < 24) thumbH = 24;
+    int y = track->top + (trackH - thumbH) * d->scroll / m;
+    SetRect(thumb, track->left, y, track->right, y + thumbH);
+    return TRUE;
 }
 
 /* Number controls sit on the right edge: [-] value [+] */
@@ -222,6 +295,15 @@ static void SetControlRects(int top, RECT *rcMinus, RECT *rcValue, RECT *rcPlus)
     rcPlus->left  = SET_WIDTH - 40;  rcPlus->right  = SET_WIDTH - 16;
     rcMinus->top = rcValue->top = rcPlus->top = t;
     rcMinus->bottom = rcValue->bottom = rcPlus->bottom = b;
+}
+
+/* The wheel changes a number only over its [-] value [+] control, so a wheel
+   meant to scroll is not caught by the label of a row passing under it. */
+static BOOL SetOverNumberControl(SetEditData *d, int row, int x, int y)
+{
+    RECT rcMinus, rcValue, rcPlus;
+    SetControlRects(SetRowTop(d, row), &rcMinus, &rcValue, &rcPlus);
+    return x >= rcMinus.left && x <= rcPlus.right && y >= rcMinus.top && y < rcMinus.bottom;
 }
 
 static void SetToggleRect(int top, RECT *rc)
@@ -289,7 +371,9 @@ static void SetActionText(SetEditData *d, SetRow *r, WCHAR *buf, int cch)
 static int SetHitTest(SetEditData *d, int x, int y, int *outHit)
 {
     *outHit = SETHIT_NONE;
-    int top = SET_HEADER_H;
+    if (y < SET_HEADER_H || y >= SET_HEADER_H + d->viewH)
+        return -1;   /* the header or the footer: rows scrolled under them do not count */
+    int top = SET_HEADER_H - d->scroll;
     for (int i = 0; i < d->rowCount; i++) {
         SetRow *r = &d->rows[i];
         int rh = SetRowHeight(r);
@@ -392,14 +476,22 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
     DrawTextW(dc, L"Settings", -1, &rcTitle, DT_LEFT | DT_SINGLELINE);
     SelectObject(dc, hFontSmall);
     SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
-    DrawTextW(dc, L"wheel = adjust", -1, &rcTitle, DT_RIGHT | DT_SINGLELINE);
+    DrawTextW(dc, SetMaxScroll(d) > 0 ? L"wheel = adjust or scroll" : L"wheel = adjust", -1,
+              &rcTitle, DT_RIGHT | DT_SINGLELINE);
 
     HPEN noPen = CreatePen(PS_NULL, 0, 0);
     HPEN oldPen = (HPEN)SelectObject(dc, noPen);
 
-    int y = SET_HEADER_H;
+    /* Rows draw inside the rows area only; one scrolled halfway is cut at the edge. */
+    int viewTop = SET_HEADER_H, viewBottom = SET_HEADER_H + d->viewH;
+    IntersectClipRect(dc, 0, viewTop, w, viewBottom);
+    int y = SET_HEADER_H - d->scroll;
     for (int i = 0; i < d->rowCount; i++) {
         SetRow *r = &d->rows[i];
+        if (y + SetRowHeight(r) <= viewTop || y >= viewBottom) {
+            y += SetRowHeight(r);
+            continue;
+        }
 
         if (r->kind == SET_SECTION) {
             if (r->divider) {
@@ -526,6 +618,20 @@ static void RenderSettings(HWND hwnd, SetEditData *d)
 
         y += SET_ROW_H;
     }
+    SelectClipRgn(dc, NULL);
+
+    RECT rcTrack, rcThumb;
+    if (SetScrollbarRects(d, &rcTrack, &rcThumb)) {
+        HBRUSH tb = CreateSolidBrush(HexToColorRef(CLR_SURFACE));
+        HBRUSH th = CreateSolidBrush(HexToColorRef(d->thumbDrag ? CLR_SUBTEXT : CLR_TRACK));
+        HBRUSH ob = (HBRUSH)SelectObject(dc, tb);
+        RoundRect(dc, rcTrack.left, rcTrack.top, rcTrack.right + 1, rcTrack.bottom + 1, 4, 4);
+        SelectObject(dc, th);
+        RoundRect(dc, rcThumb.left, rcThumb.top, rcThumb.right + 1, rcThumb.bottom + 1, 4, 4);
+        SelectObject(dc, ob);
+        DeleteObject(tb);
+        DeleteObject(th);
+    }
 
     /* Footer: the shared Cancel and Save buttons */
     RECT rcCancel, rcSave;
@@ -613,6 +719,8 @@ static void SetA11yDescribe(void *ctx, int index, A11yItem *out)
     SetRow *r = &d->rows[row];
     int top = SetRowTop(d, row);
     SetRect(&out->rect, 8, top, SET_WIDTH - 8, top + SET_ROW_H);
+    if (!SetRowVisible(d, row))
+        out->state |= STATE_SYSTEM_OFFSCREEN;
 
     switch (r->kind) {
     case SET_TOGGLE:
@@ -698,6 +806,7 @@ static const A11yModel g_setModel = {
 static void SetMoveFocus(HWND hwnd, SetEditData *d, int row)
 {
     d->focusRow = row;
+    SetEnsureVisible(d, row);
     RenderSettings(hwnd, d);
     A11y_NotifyFocus(hwnd, SetModelFromRow(d, row));
 }
@@ -1071,6 +1180,19 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
 
+        RECT rcTrack, rcThumb;
+        if (SetScrollbarRects(d, &rcTrack, &rcThumb) && x >= SET_WIDTH - SET_SCROLLBAR_W &&
+            y >= rcTrack.top && y < rcTrack.bottom) {
+            if (y < rcThumb.top || y >= rcThumb.bottom)   /* the track pages, as in Windows */
+                SetScrollTo(d, d->scroll + (y < rcThumb.top ? -d->viewH : d->viewH) * 9 / 10);
+            d->thumbDrag = TRUE;
+            d->thumbDragY = y;
+            d->thumbDragScroll = d->scroll;
+            SetCapture(hwnd);
+            RenderSettings(hwnd, d);
+            return 0;
+        }
+
         int hit;
         int row = SetHitTest(d, x, y, &hit);
         if (d->captureRow >= 0 && !(row == d->captureRow && hit == SETHIT_HOTKEY))
@@ -1104,7 +1226,30 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         return 0;
     }
 
+    case WM_LBUTTONUP:
+        if (d->thumbDrag)
+            ReleaseCapture();   /* WM_CAPTURECHANGED ends the drag */
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        if (d->thumbDrag) {
+            d->thumbDrag = FALSE;
+            RenderSettings(hwnd, d);
+        }
+        return 0;
+
     case WM_MOUSEMOVE: {
+        if (d->thumbDrag) {
+            RECT rcTrack, rcThumb;
+            if (SetScrollbarRects(d, &rcTrack, &rcThumb)) {
+                int travel = (rcTrack.bottom - rcTrack.top) - (rcThumb.bottom - rcThumb.top);
+                int dy = GET_Y_LPARAM(lParam) - d->thumbDragY;
+                if (travel > 0)
+                    SetScrollTo(d, d->thumbDragScroll + dy * SetMaxScroll(d) / travel);
+                RenderSettings(hwnd, d);
+            }
+            return 0;
+        }
         int hit;
         int row = SetHitTest(d, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &hit);
         if (row >= 0 && !SetRowEnabled(d, &d->rows[row]))
@@ -1121,13 +1266,26 @@ static LRESULT CALLBACK SetWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         int notches = WheelNotches(&wheelAccum, wParam);
         POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
         ScreenToClient(hwnd, &pt);
+        if (notches == 0)
+            return 0;
         int hit;
         int row = SetHitTest(d, pt.x, pt.y, &hit);
-        if (notches != 0 && row >= 0 && d->rows[row].kind == SET_NUMBER) {
+        BOOL scrollable = SetMaxScroll(d) > 0;
+        BOOL latched = scrollable && GetTickCount() - d->lastWheelScroll < SET_WHEEL_LATCH_MS;
+        if (!latched && row >= 0 && d->rows[row].kind == SET_NUMBER &&
+            SetRowEnabled(d, &d->rows[row]) && SetOverNumberControl(d, row, pt.x, pt.y)) {
             for (int n = notches; n != 0; n += (n > 0 ? -1 : 1))
                 SetAdjust(&d->rows[row], n > 0 ? 1 : -1);
             d->hoverRow = row;
             SetRowChanged(hwnd, d, row);
+        } else if (scrollable) {
+            /* Anywhere but over a number control the wheel scrolls, two rows a
+               notch. The time is taken even at either end, so a wheel still
+               spinning there does not start changing a value. */
+            SetScrollTo(d, d->scroll - notches * 2 * SET_ROW_H);
+            d->lastWheelScroll = GetTickCount();
+            d->hoverRow = SetHitTest(d, pt.x, pt.y, &hit);
+            RenderSettings(hwnd, d);
         }
         return 0;
     }
@@ -1196,9 +1354,6 @@ void UI_ShowSettings(HWND hwndOwner, Settings *s)
         wcscpy(g_set.errorText, L"In use by another app");
     }
 
-    int w = SET_WIDTH;
-    int h = SetHeight(&g_set);
-
     /* Centered on the monitor the cursor is on. The window is too tall to
        hang off the cursor the way the menu does: opened from the tray menu it
        was pushed into the top corner of the screen. */
@@ -1208,9 +1363,20 @@ void UI_ShowSettings(HWND hwndOwner, Settings *s)
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(hMon, &mi);
 
+    /* The rows get what the work area leaves after the header, the footer and
+       a margin; when that is less than they need, they scroll. */
+    int room = (mi.rcWork.bottom - mi.rcWork.top) - SET_HEADER_H - SET_FOOTER_H - 2 * 8;
+    int content = SetContentHeight(&g_set);
+    g_set.viewH = (room < content) ? (room > 3 * SET_ROW_H ? room : 3 * SET_ROW_H) : content;
+    g_set.scroll = 0;
+    g_set.thumbDrag = FALSE;
+    g_set.lastWheelScroll = GetTickCount() - SET_WHEEL_LATCH_MS;
+
+    int w = SET_WIDTH;
+    int h = SetHeight(&g_set);
     int x = (mi.rcWork.left + mi.rcWork.right - w) / 2;
     int y = (mi.rcWork.top + mi.rcWork.bottom - h) / 2;
-    if (y < mi.rcWork.top) y = mi.rcWork.top;   /* taller than the work area */
+    if (y < mi.rcWork.top) y = mi.rcWork.top;
 
     g_setHwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
