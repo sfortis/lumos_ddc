@@ -70,7 +70,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 <p align="center">
   <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, schedule, Home Assistant, monitor minimums and presets" />
   &nbsp;&nbsp;
-  <img src="screenshots/03-osd.png" width="248" alt="On-screen display overlay with percentage and progress bar" />
+  <img src="screenshots/03-osd.png" width="200" alt="On-screen display overlay with percentage and progress bar" />
 </p>
 
 ## Features
