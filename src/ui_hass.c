@@ -145,14 +145,22 @@ static const WCHAR kHttpLocalNote[] =
     L"http on the local network: the token is not encrypted on the LAN.";
 
 /* The address in the field, normalized: trimmed, with http:// added when it
-   has no scheme. Empty when the field is empty. */
-static void ReadUrl(WCHAR *out)
+   has no scheme. Empty when the field is empty. FALSE when the address is too
+   long to take http:// in front; out is empty then too. */
+static BOOL ReadUrl(WCHAR *out)
 {
     WCHAR typed[HASS_URL_MAX];
     GetWindowTextW(g_ha.url, typed, HASS_URL_MAX);
-    if (!HassUrl_Normalize(typed, out, HASS_URL_MAX))
-        out[0] = L'\0';
+    if (HassUrl_Normalize(typed, out, HASS_URL_MAX))
+        return TRUE;
+    out[0] = L'\0';
+    for (const WCHAR *p = typed; *p; p++)
+        if (!iswspace(*p))
+            return FALSE;
+    return TRUE;
 }
+
+static const WCHAR kUrlTooLong[] = L"The address is too long.";
 
 /* Show the http warning or note for this URL. For https, a warning or note
    left from an earlier http address is cleared. Returns FALSE for https. */
@@ -186,7 +194,11 @@ static void StartList(void)
     ListJob *job = (ListJob *)calloc(1, sizeof(ListJob));
     if (!job)
         return;
-    ReadUrl(job->url);
+    if (!ReadUrl(job->url)) {
+        SetStatus(kUrlTooLong, TRUE);
+        free(job);
+        return;
+    }
     /* Show the address that is used, so "192.168.1.10:8123" becomes
        "http://192.168.1.10:8123" in the field. */
     WCHAR shown[HASS_URL_MAX];
@@ -295,9 +307,12 @@ static void Save(void)
 {
     Settings *s = g_ha.settings;
     WCHAR url[HASS_URL_MAX];
-    ReadUrl(url);
+    if (!ReadUrl(url)) {
+        SetStatus(kUrlTooLong, TRUE);
+        return;   /* saving it would erase the stored address */
+    }
     BOOL urlChanged = !SameUrl(url, s->haUrl);
-    char token[HASS_TOKEN_MAX];
+    char token[HASS_TOKEN_MAX] = "";   /* stays empty when the URL is cleared */
     const WCHAR *problem = url[0] ? CurrentToken(url, token, HASS_TOKEN_MAX) : NULL;
     if (problem) {
         SecureZeroMemory(token, sizeof(token));
@@ -550,7 +565,14 @@ static LRESULT CALLBACK HassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (LOWORD(wParam) == IDC_URL && HIWORD(wParam) == EN_CHANGE) {
                 WCHAR url[HASS_URL_MAX];
                 ReadUrl(url);
-                /* A list from another address must not be saved with this one. */
+                /* A list from another address must not be saved with this one,
+                   neither one shown already nor one still on its way. */
+                if (g_ha.busy) {
+                    g_ha.gen++;
+                    g_ha.busy = FALSE;
+                    EnableWindow(g_ha.connect, TRUE);
+                    SetStatus(L"Connect to list the sensors of this address.", FALSE);
+                }
                 if (g_ha.count > 0) {
                     ClearList();
                     SetStatus(L"Connect to list the sensors of this address.", FALSE);

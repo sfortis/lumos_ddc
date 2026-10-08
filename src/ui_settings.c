@@ -740,7 +740,10 @@ static void SetA11yDescribe(void *ctx, int index, A11yItem *out)
         WCHAR val[200];
         SetActionText(d, r, val, 200);
         out->role = ROLE_SYSTEM_PUSHBUTTON;
-        _snwprintf(out->name, 159, L"%s: %s", r->label, val);
+        /* Section titles are not in the MSAA tree, so "Configure" alone would
+           not tell a screen reader user what it configures. */
+        const WCHAR *label = r->action == SET_ACT_HASS ? L"Home Assistant settings" : r->label;
+        _snwprintf(out->name, 159, L"%s: %s", label, val);
         out->name[159] = L'\0';
         wcscpy(out->action, L"Press");
         break;
