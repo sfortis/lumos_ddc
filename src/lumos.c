@@ -1497,24 +1497,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (Settings_GetAutostart() != g_settings.autostart)
                 Settings_SetAutostart(g_settings.autostart);
             Settings_Save(&g_settings);
-            /* A changed minimum takes effect at the current level now. Only
-               then: re-applying on every Save would also undo a level the user
-               set on one monitor alone, when all they changed was a hotkey.
-               The level is read through the old ranges, before they change. */
-            int oldLo[MAX_MONITORS];
-            for (int i = 0; i < g_monitors.count; i++)
-                oldLo[i] = g_monitors.monitors[i].rangeLo;
-            int level = (g_masterTarget >= 0) ? g_masterTarget : MasterTargetFromMonitors();
-            Settings_ApplyRanges(&g_settings, &g_monitors);
-            BOOL minChanged = FALSE;
-            for (int i = 0; i < g_monitors.count; i++)
-                if (g_monitors.monitors[i].rangeLo != oldLo[i])
-                    minChanged = TRUE;
-            if (minChanged && !g_idleDimmed) {
-                g_masterTarget = level;
-                Monitor_SetAllBrightness(&g_monitors, g_masterTarget);
-                UI_RefreshPopup(g_hwndPopup, &g_monitors);
-            }
             if (!g_settings.idleDimEnabled)
                 Idle_Restore();           /* undo an active dim right away */
             /* Auto brightness switched on or off, or its learned curve reset. */

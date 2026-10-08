@@ -1,5 +1,4 @@
 #include "ui_internal.h"
-#include "brightmap.h"
 #include <windowsx.h>
 
 static const WCHAR SET_CLASS[]     = L"LumosSettings";
@@ -54,8 +53,6 @@ typedef struct {
     int   idleDimMinutes;
     int   presetValues[MAX_PRESETS];
     int   presetCount;
-    int   rangeLo[MAX_RANGES];     /* per Settings range entry */
-    int   rangeCount;              /* entries when the window opened; a rescan may add more */
     BOOL  haAutoEnabled;
     BOOL  haResetCurve;            /* forget the learned points on Save */
     Hotkey hotkeys[HOTKEY_COUNT];
@@ -168,20 +165,6 @@ static void BuildSettingsRows(SetEditData *d)
     SetAddAction(d, L"Configure", SET_ACT_HASS);
     SetAddToggle(d, L"Auto brightness", &d->haAutoEnabled);
     SetAddAction(d, L"Learned curve", SET_ACT_RESET_CURVE);
-
-    /* The low end of each connected monitor's range: its level at All
-       Monitors 0%. The high end is set in the popup. */
-    Settings *s = d->settings;
-    BOOL anyMonitor = FALSE;
-    for (int i = 0; i < s->rangeCount; i++) {
-        if (!s->rangeConnected[i]) continue;
-        if (!anyMonitor) {
-            SetAddRow(d, SET_SECTION, L"MONITOR MINIMUM");
-            anyMonitor = TRUE;
-        }
-        SetAddNumber(d, s->rangeNames[i], &d->rangeLo[i],
-                     0, s->rangeHi[i] - BRIGHTMAP_MIN_SPAN, 1, SET_UNIT_PERCENT);
-    }
 
     if (d->presetCount > 0) {
         SetAddRow(d, SET_SECTION, L"PRESETS");
@@ -956,8 +939,6 @@ static void SetCommit(SetEditData *d)
         s->presets[i].brightness = (DWORD)d->presetValues[i];
     for (int i = 0; i < HOTKEY_COUNT; i++)
         s->hotkeys[i] = d->hotkeys[i];
-    for (int i = 0; i < d->rangeCount && i < s->rangeCount; i++)
-        s->rangeLo[i] = d->rangeLo[i];
     s->haAutoEnabled = d->haAutoEnabled;
     if (d->haResetCurve)
         s->haCurve.count = 0;   /* back to the default curve */
@@ -1346,10 +1327,7 @@ void UI_ShowSettings(HWND hwndOwner, Settings *s)
         g_set.presetValues[i] = (int)s->presets[i].brightness;
     for (int i = 0; i < HOTKEY_COUNT; i++)
         g_set.hotkeys[i] = s->hotkeys[i];
-    g_set.rangeCount = s->rangeCount;
     g_set.haAutoEnabled = s->haAutoEnabled;
-    for (int i = 0; i < s->rangeCount; i++)
-        g_set.rangeLo[i] = s->rangeLo[i];
     BuildSettingsRows(&g_set);
     g_set.focusRow = SetStepFocus(&g_set, SET_SAVE(&g_set), 1);   /* first editable row */
     if (g_hotkeyHost && g_hotkeyHost->firstFailed() >= 0) {

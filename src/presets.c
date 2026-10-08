@@ -103,7 +103,6 @@ static void LoadRanges(Settings *s)
         s->rangeNames[i][135] = L'\0';
         s->rangeLo[i] = lo;
         s->rangeHi[i] = hi;
-        s->rangeConnected[i] = FALSE;
     }
     if (s->rangeCount > 0)
         return;
@@ -118,7 +117,6 @@ static void LoadRanges(Settings *s)
         GetPrivateProfileStringW(L"Deltas", key, L"0", val, 32, s->iniPath);
         wcsncpy(s->rangeNames[n], key, 135);
         s->rangeNames[n][135] = L'\0';
-        s->rangeConnected[n] = FALSE;
         offsets[n++] = (int)wcstol(val, NULL, 10);
     }
     if (n == 0)
@@ -407,7 +405,6 @@ static int RangeEntry(Settings *s, const WCHAR *key, BOOL create)
     s->rangeNames[i][135] = L'\0';
     s->rangeLo[i] = s->rangeNewLo;
     s->rangeHi[i] = s->rangeNewHi;
-    s->rangeConnected[i] = FALSE;
     return i;
 }
 
@@ -420,8 +417,6 @@ static BOOL HasRange(const BrightMonitor *mon)
 
 void Settings_ApplyRanges(Settings *s, MonitorList *ml)
 {
-    for (int i = 0; i < s->rangeCount; i++)
-        s->rangeConnected[i] = FALSE;
     WCHAR key[136];
     for (int i = 0; i < ml->count; i++) {
         BrightMonitor *mon = &ml->monitors[i];
@@ -436,7 +431,6 @@ void Settings_ApplyRanges(Settings *s, MonitorList *ml)
         BrightMap_Normalize(&s->rangeLo[e], &s->rangeHi[e]);
         mon->rangeLo = s->rangeLo[e];
         mon->rangeHi = s->rangeHi[e];
-        s->rangeConnected[e] = TRUE;
     }
 }
 

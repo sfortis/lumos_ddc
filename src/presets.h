@@ -27,14 +27,12 @@ typedef struct {
     int    step;       /* brightness step for hotkeys and mouse wheel (default 5) */
     BOOL   autostart;
     /* Per-monitor ranges from [Ranges], keyed by monitor name (a second
-       monitor with the same name gets " #2", and so on). rangeConnected marks
-       the entries whose monitor is in the current list (Settings_ApplyRanges).
-       rangeNewLo/Hi is the range a monitor without an entry starts with. */
+       monitor with the same name gets " #2", and so on). rangeNewLo/Hi is the
+       range a monitor without an entry starts with. */
     int    rangeCount;
     WCHAR  rangeNames[MAX_RANGES][136];
     int    rangeLo[MAX_RANGES];
     int    rangeHi[MAX_RANGES];
-    BOOL   rangeConnected[MAX_RANGES];
     int    rangeNewLo, rangeNewHi;
     SchedulePoint schedule[MAX_SCHEDULE];
     int           scheduleCount;

@@ -63,12 +63,12 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: a slider and a maximum for each monitor, the All Monitors slider, and the auto brightness panel with the light sensor reading and the learned curve" />
+  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: a slider, a minimum and a maximum for each monitor, the All Monitors slider, and the auto brightness panel with the light sensor reading and the learned curve" />
   &nbsp;&nbsp;
   <img src="screenshots/02-context-menu.png" width="220" alt="Dark context menu in three groups: presets; auto brightness, schedule and idle dim; re-scan, Settings and autostart; then About and Exit" />
 </p>
 <p align="center">
-  <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, schedule, Home Assistant, monitor minimums and presets" />
+  <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, schedule, Home Assistant and presets" />
   &nbsp;&nbsp;
   <img src="screenshots/03-osd.png" width="200" alt="On-screen display overlay with percentage and progress bar" />
 </p>
@@ -77,7 +77,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 
 - **Dual backend** - External monitors are driven over DDC/CI (dxva2) and internal laptop panels over WMI, in the same interface.
 - **Tray popup** - A dark popup with a slider for each monitor and an "All Monitors" slider that moves them together.
-- **Per-monitor range** - Each monitor has a minimum and a maximum: its level when All Monitors is at 0% and at 100%. All Monitors moves every monitor linearly across its own range, so two monitors matched at both ends stay matched in between, and every step moves every monitor. The maximum is set with the `-` / `+` under the monitor in the popup and the minimum in Settings. Offsets from older versions are converted automatically.
+- **Per-monitor range** - Each monitor has a minimum and a maximum: its level when All Monitors is at 0% and at 100%. All Monitors moves every monitor linearly across its own range, so two monitors matched at both ends stay matched in between, and every step moves every monitor. Both are set with the `-` / `+` under the monitor in the popup: Min on the left, Max on the right. Offsets from older versions are converted automatically.
 - **Global hotkeys** - `Ctrl+Win+Up` / `Ctrl+Win+Down` change the brightness of all screens, and `Ctrl+Win+B` opens the popup. All three can be changed in Settings. An installation upgraded from 1.1 or older keeps the `Ctrl+Alt+Up` / `Ctrl+Alt+Down` it had.
 - **Mouse wheel on the tray icon** - Scrolling over the tray icon moves the brightness up or down by one step.
 - **On-screen display** - A hotkey or wheel change shows an overlay with the All Monitors level and a progress bar.
@@ -87,7 +87,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 - **Auto brightness from a light sensor** - Optional. Lumos reads an illuminance sensor from your Home Assistant server and sets the All Monitors level from the light in the room. When you change the brightness yourself, Lumos remembers that level for that light, so the curve learns what you like. See [Auto brightness with Home Assistant](#auto-brightness-with-home-assistant).
 - **Presets** - Night, Day and Presentation, with editable brightness values.
 - **Command line** - `lumosctl.exe` sets, raises, lowers and reads the brightness of all monitors or one of them, applies presets, and switches the schedule and idle dim, through the running Lumos.
-- **Settings window** - A dark window for the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness, the minimum of each monitor, and the preset values.
+- **Settings window** - A dark window for the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness, and the preset values.
 - **Reconnect and restore** - Lumos detects the monitors again after a plug or unplug, an unlock, a display power-on and a wake from sleep, and re-applies your brightness, because displays often reset to full brightness across sleep. An external monitor often wakes a few seconds after the laptop panel and does not answer DDC/CI at first. Lumos then shows it as **Unavailable**, keeps the other screens working, and tries again after 2, 5, 10 and 20 seconds and then every minute until the monitor answers. The same retry runs when Lumos starts while a known monitor is still off.
 - **Autostart** - Optional launch at login.
 - **Single instance with handoff** - Starting a newer build takes over from the one that is running.
@@ -138,9 +138,9 @@ build.bat debug      :: debug build, logs to %APPDATA%\Lumos\lumos-*.log
 | `Ctrl+Win+Up` / `Ctrl+Win+Down` | Brightness up or down on all monitors |
 | `Ctrl+Win+B` | Open the brightness popup with keyboard focus |
 | Drag a slider in the popup | Set that monitor, or all of them with the All Monitors slider |
-| Click `-` / `+` under a monitor | Change that monitor's maximum, its level at All Monitors 100% |
+| Click `-` / `+` under a monitor | Change that monitor's minimum (Min) or maximum (Max), its level at All Monitors 0% or 100% |
 
-To match two monitors, set All Monitors to 100% and change the maximum of the brighter monitor until both look the same. Then set All Monitors to 0% and, in Settings, raise the minimum of the monitor that is darker at 0% until they match again.
+To match two monitors, set All Monitors to 100% and change the maximum of the brighter monitor until both look the same. Then set All Monitors to 0% and raise the minimum of the monitor that is darker until they match again.
 
 ## Auto brightness with Home Assistant
 
@@ -188,7 +188,7 @@ To reach the tray icon, press `Win+B` and move to the Lumos icon with the arrow 
 
 | Window | Keys |
 |---|---|
-| Popup | `Tab` / `Shift+Tab` move between the sliders and the monitor maximums. The arrow keys change the value by 1 (`Up` and `Right` raise it), `Page Up` / `Page Down` change a slider by 10 and a maximum by 5, and `Home` / `End` jump to the limits. `Esc` closes. |
+| Popup | `Tab` / `Shift+Tab` move between the sliders and the minimum and maximum of each monitor. The arrow keys change the value by 1 (`Up` and `Right` raise it), `Page Up` / `Page Down` change a slider by 10 and a minimum or maximum by 5, and `Home` / `End` jump to the limits. `Esc` closes. |
 | Menu | `Up` / `Down` move, `Home` / `End` jump to the first or last item, a letter jumps to the next item that starts with it, `Enter` or `Space` chooses, and `Esc` closes. |
 | Settings | `Tab`, `Shift+Tab`, `Up` and `Down` move between rows and the buttons. `Left` / `Right` change a number or flip a switch, and `Space` flips a switch. `Enter` on a hotkey row starts recording a new combination, on the Configure or Learned curve row it does what a click does, and anywhere else it saves. `Esc` closes without saving. |
 | Home Assistant | The window is built from standard Windows text fields, buttons and a list. `Tab` and `Shift+Tab` move between them, the arrow keys choose a sensor in the list, and `Esc` closes without saving. |
@@ -228,7 +228,7 @@ Settings live in an INI file that is created on the first run:
 %APPDATA%\Lumos\config.ini
 ```
 
-Almost everything in it can be set from the interface. Settings covers the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness, the monitor minimums and the preset values. The popup sets the monitor maximums, and the schedule points have their own editor (right-click the tray icon, then Edit Schedule). Preset names are the one thing that has to be edited in the file, because the interface has no text input.
+Almost everything in it can be set from the interface. Settings covers the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness and the preset values. The popup sets the minimum and maximum of each monitor, and the schedule points have their own editor (right-click the tray icon, then Edit Schedule). Preset names are the one thing that has to be edited in the file, because the interface has no text input.
 
 ```ini
 [Presets]

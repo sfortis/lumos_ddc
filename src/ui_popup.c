@@ -77,17 +77,23 @@ void UI_SetManualChangeCallback(ManualChangeCallback cb)
     g_manualChangeCb = cb;
 }
 
-/* ---- Delta button layout ---- */
+/* ---- Range control layout ----
+   Under each monitor's slider, the two ends of its range side by side:
+   [-] Min 25% [+] on the left and [-] Max 100% [+] on the right. */
 
 #define DELTA_BTN_W   22
 #define DELTA_BTN_H   16
+#define RANGE_GROUP_OFFSET 62   /* from the slider's center to a group's center */
 
-static void GetDeltaButtonRects(int row, RECT *rcMinus, RECT *rcValue, RECT *rcPlus)
+enum { RANGE_MIN = 0, RANGE_MAX = 1 };
+
+static void GetDeltaButtonRects(int row, int end, RECT *rcMinus, RECT *rcValue, RECT *rcPlus)
 {
     RECT rcSlider;
     GetSliderRect(row, &rcSlider);
     int cy = rcSlider.bottom + 6;
-    int centerX = (rcSlider.left + rcSlider.right) / 2;
+    int centerX = (rcSlider.left + rcSlider.right) / 2 +
+                  (end == RANGE_MAX ? RANGE_GROUP_OFFSET : -RANGE_GROUP_OFFSET);
 
     rcMinus->left = centerX - 50;
     rcMinus->right = rcMinus->left + DELTA_BTN_W;
@@ -105,24 +111,26 @@ static void GetDeltaButtonRects(int row, RECT *rcMinus, RECT *rcValue, RECT *rcP
     rcValue->bottom = cy + DELTA_BTN_H;
 }
 
-/* Returns: -1 = minus btn, +1 = plus btn, 0 = none. Sets *outRow. */
-static int HitTestDelta(PopupData *pd, int x, int y, int *outRow)
+/* Returns: -1 = minus btn, +1 = plus btn, 0 = none. Sets *outRow and
+   *outEnd (RANGE_MIN or RANGE_MAX). */
+static int HitTestDelta(PopupData *pd, int x, int y, int *outRow, int *outEnd)
 {
     for (int row = 0; row < pd->ml->count; row++) {
-        RECT rcMinus, rcValue, rcPlus;
-        GetDeltaButtonRects(row, &rcMinus, &rcValue, &rcPlus);
-        if (y >= rcMinus.top && y <= rcMinus.bottom) {
-            if (x >= rcMinus.left && x <= rcMinus.right) {
-                *outRow = row;
+        for (int end = RANGE_MIN; end <= RANGE_MAX; end++) {
+            RECT rcMinus, rcValue, rcPlus;
+            GetDeltaButtonRects(row, end, &rcMinus, &rcValue, &rcPlus);
+            if (y < rcMinus.top || y > rcMinus.bottom)
+                break;   /* both groups share the line */
+            *outRow = row;
+            *outEnd = end;
+            if (x >= rcMinus.left && x <= rcMinus.right)
                 return -1;
-            }
-            if (x >= rcPlus.left && x <= rcPlus.right) {
-                *outRow = row;
+            if (x >= rcPlus.left && x <= rcPlus.right)
                 return 1;
-            }
         }
     }
     *outRow = -1;
+    *outEnd = RANGE_MIN;
     return 0;
 }
 
@@ -351,17 +359,27 @@ static int XFromPercent(RECT *sliderRect, int pct)
 }
 
 /* ---- Keyboard items ----
-   Focus order follows the layout: each monitor's slider, then its offset
-   control, then "All Monitors". Item i belongs to row i / 2, which also gives
-   the master row (ml->count) for the last item. */
+   Focus order follows the layout: each monitor's slider, then its minimum,
+   then its maximum, then "All Monitors". Item i belongs to row i / 3, which
+   also gives the master row (ml->count) for the last item. */
 
-static int ItemCount(PopupData *pd)  { return pd->ml->count * 2 + 1; }
-static int MasterItem(PopupData *pd) { return pd->ml->count * 2; }
-static int ItemRow(int item)         { return item / 2; }
+#define ITEMS_PER_ROW 3
 
-static BOOL ItemIsOffset(PopupData *pd, int item)
+static int ItemCount(PopupData *pd)  { return pd->ml->count * ITEMS_PER_ROW + 1; }
+static int MasterItem(PopupData *pd) { return pd->ml->count * ITEMS_PER_ROW; }
+static int ItemRow(int item)         { return item / ITEMS_PER_ROW; }
+static int SliderItem(int row)       { return row * ITEMS_PER_ROW; }
+static int RangeItem(int row, int end) { return row * ITEMS_PER_ROW + 1 + end; }
+
+static BOOL ItemIsRange(PopupData *pd, int item)
 {
-    return item < MasterItem(pd) && (item % 2) == 1;
+    return item < MasterItem(pd) && (item % ITEMS_PER_ROW) != 0;
+}
+
+/* RANGE_MIN or RANGE_MAX for a range item. */
+static int ItemRangeEnd(int item)
+{
+    return (item % ITEMS_PER_ROW) == 1 ? RANGE_MIN : RANGE_MAX;
 }
 
 /* The percentage a row shows right now, including a drag in progress. */
@@ -378,9 +396,9 @@ static int RowPercent(PopupData *pd, int row)
 static void GetItemFocusRect(PopupData *pd, int item, RECT *rc)
 {
     int row = ItemRow(item);
-    if (ItemIsOffset(pd, item)) {
+    if (ItemIsRange(pd, item)) {
         RECT rcMinus, rcValue, rcPlus;
-        GetDeltaButtonRects(row, &rcMinus, &rcValue, &rcPlus);
+        GetDeltaButtonRects(row, ItemRangeEnd(item), &rcMinus, &rcValue, &rcPlus);
         SetRect(rc, rcMinus.left - 3, rcMinus.top - 3, rcPlus.right + 3, rcPlus.bottom + 3);
     } else {
         GetSliderRect(row, rc);
@@ -420,10 +438,11 @@ static void PopupA11yDescribe(void *ctx, int index, A11yItem *out)
     if (mon && !mon->controllable)
         out->state |= STATE_SYSTEM_UNAVAILABLE;
 
-    if (ItemIsOffset(pd, index)) {
+    if (ItemIsRange(pd, index)) {
+        BOOL isMin = ItemRangeEnd(index) == RANGE_MIN;
         out->role = ROLE_SYSTEM_SPINBUTTON;
-        _snwprintf(out->name, 159, L"%s maximum", mon->name);
-        _snwprintf(out->value, 63, L"%d%%", mon->rangeHi);
+        _snwprintf(out->name, 159, L"%s %s", mon->name, isMin ? L"minimum" : L"maximum");
+        _snwprintf(out->value, 63, L"%d%%", isMin ? mon->rangeLo : mon->rangeHi);
     } else {
         out->role = ROLE_SYSTEM_SLIDER;
         if (isMaster)
@@ -557,27 +576,27 @@ static void RenderPopup(HWND hwnd, PopupData *pd)
                     thumbX + SLIDER_THUMB_R, cy + SLIDER_THUMB_R);
         }
 
-        /* Delta controls (skip master row) */
+        /* The range controls (not on the master row): the monitor's level
+           at All Monitors 0% and at 100% */
         if (!isMaster) {
-            RECT rcMinus, rcValue, rcPlus;
-            GetDeltaButtonRects(row, &rcMinus, &rcValue, &rcPlus);
-
-            /* [-] button */
             HBRUSH btnBrush = CreateSolidBrush(HexToColorRef(CLR_SURFACE));
-            FillRect(dc, &rcMinus, btnBrush);
-            FillRect(dc, &rcPlus, btnBrush);
-            DeleteObject(btnBrush);
-
             SelectObject(dc, hFontSmall);
             SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
-            DrawTextW(dc, L"\x2013", -1, &rcMinus, DT_CENTER | DT_VCENTER | DT_SINGLELINE); /* en dash as minus */
-            DrawTextW(dc, L"+", -1, &rcPlus, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            /* The monitor's level at All Monitors 100% */
-            WCHAR maxStr[16];
-            wsprintfW(maxStr, L"Max %d%%", ml->monitors[row].rangeHi);
-            SetTextColor(dc, HexToColorRef(CLR_SUBTEXT));
-            DrawTextW(dc, maxStr, -1, &rcValue, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            for (int end = RANGE_MIN; end <= RANGE_MAX; end++) {
+                RECT rcMinus, rcValue, rcPlus;
+                GetDeltaButtonRects(row, end, &rcMinus, &rcValue, &rcPlus);
+                FillRect(dc, &rcMinus, btnBrush);
+                FillRect(dc, &rcPlus, btnBrush);
+                DrawTextW(dc, L"\x2013", -1, &rcMinus, DT_CENTER | DT_VCENTER | DT_SINGLELINE); /* en dash as minus */
+                DrawTextW(dc, L"+", -1, &rcPlus, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                WCHAR str[16];
+                if (end == RANGE_MIN)
+                    wsprintfW(str, L"Min %d%%", ml->monitors[row].rangeLo);
+                else
+                    wsprintfW(str, L"Max %d%%", ml->monitors[row].rangeHi);
+                DrawTextW(dc, str, -1, &rcValue, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            DeleteObject(btnBrush);
         }
     }
 
@@ -692,17 +711,20 @@ static void EndKeyDrag(HWND hwnd, PopupData *pd)
     RenderPopup(hwnd, pd);
 }
 
-/* Set a monitor's level at All Monitors 100%. The low end comes from
-   Settings, and the range keeps its minimum width. */
-static void AdjustMax(HWND hwnd, PopupData *pd, int row, int value)
+/* Set one end of a monitor's range: its level at All Monitors 0% (RANGE_MIN)
+   or at 100% (RANGE_MAX). An end stops where the range would get narrower
+   than BRIGHTMAP_MIN_SPAN; it never pushes the other end. */
+static void AdjustRange(HWND hwnd, PopupData *pd, int row, int end, int value)
 {
     BrightMonitor *mon = &pd->ml->monitors[row];
-    int lo = mon->rangeLo;
-    if (value < lo + BRIGHTMAP_MIN_SPAN) value = lo + BRIGHTMAP_MIN_SPAN;
-    if (value > 100) value = 100;
-    if (value == mon->rangeHi)
+    int *target = (end == RANGE_MIN) ? &mon->rangeLo : &mon->rangeHi;
+    int lowest  = (end == RANGE_MIN) ? 0 : mon->rangeLo + BRIGHTMAP_MIN_SPAN;
+    int highest = (end == RANGE_MIN) ? mon->rangeHi - BRIGHTMAP_MIN_SPAN : 100;
+    if (value < lowest) value = lowest;
+    if (value > highest) value = highest;
+    if (value == *target)
         return;
-    mon->rangeHi = value;
+    *target = value;
     if (g_rangeChangeCb) g_rangeChangeCb(pd->masterPercent);
     RenderPopup(hwnd, pd);
     A11y_NotifyValue(hwnd, pd->focusItem);
@@ -742,13 +764,15 @@ static void PopupKeyDown(HWND hwnd, PopupData *pd, WPARAM vk)
     default: return;
     }
 
-    if (ItemIsOffset(pd, item)) {
-        int v = pd->ml->monitors[row].rangeHi;
+    if (ItemIsRange(pd, item)) {
+        int end = ItemRangeEnd(item);
+        BrightMonitor *mon = &pd->ml->monitors[row];
+        int v = (end == RANGE_MIN) ? mon->rangeLo : mon->rangeHi;
         if (limit)
-            v = (limit > 0) ? 100 : 0;   /* AdjustMax raises 0 to the lowest allowed */
+            v = (limit > 0) ? 100 : 0;   /* AdjustRange clamps to what the range allows */
         else
             v += dir + page * 5;
-        AdjustMax(hwnd, pd, row, v);
+        AdjustRange(hwnd, pd, row, end, v);
         return;
     }
 
@@ -823,20 +847,22 @@ static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         if (!pd) break;
         int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
 
-        /* Check delta buttons first */
-        int deltaRow;
-        int deltaDir = HitTestDelta(pd, x, y, &deltaRow);
+        /* Check the range buttons first */
+        int deltaRow, deltaEnd;
+        int deltaDir = HitTestDelta(pd, x, y, &deltaRow, &deltaEnd);
         if (deltaDir != 0 && deltaRow >= 0) {
             EndKeyDrag(hwnd, pd);
-            pd->focusItem = deltaRow * 2 + 1;
-            AdjustMax(hwnd, pd, deltaRow, pd->ml->monitors[deltaRow].rangeHi + deltaDir);
+            pd->focusItem = RangeItem(deltaRow, deltaEnd);
+            BrightMonitor *mon = &pd->ml->monitors[deltaRow];
+            int v = (deltaEnd == RANGE_MIN) ? mon->rangeLo : mon->rangeHi;
+            AdjustRange(hwnd, pd, deltaRow, deltaEnd, v + deltaDir);
             return 0;
         }
 
         int row = HitTestSlider(pd, x, y);
         if (row >= 0) {
             EndKeyDrag(hwnd, pd);
-            pd->focusItem = row * 2;
+            pd->focusItem = SliderItem(row);
             pd->activeSlider = row;
             RECT rc;
             GetSliderRect(row, &rc);
@@ -1025,13 +1051,13 @@ void UI_RefreshPopup(HWND hwnd, MonitorList *ml)
     if (!hwnd || !IsWindowVisible(hwnd)) return;
     PopupData *pd = &g_popupData;
     int row = ItemRow(pd->focusItem);
-    int before = ItemIsOffset(pd, pd->focusItem) ? 0 : RowPercent(pd, row);
+    int before = ItemIsRange(pd, pd->focusItem) ? 0 : RowPercent(pd, row);
     pd->ml = ml;
     pd->masterPercent = GetMasterPercent(ml);
     RenderPopup(hwnd, pd);
     /* A hotkey or the schedule changed the level under the focused slider:
        the screen reader hears it as the slider's new value. */
-    if (!ItemIsOffset(pd, pd->focusItem) && RowPercent(pd, row) != before)
+    if (!ItemIsRange(pd, pd->focusItem) && RowPercent(pd, row) != before)
         A11y_NotifyValue(hwnd, pd->focusItem);
 }
 
