@@ -5,11 +5,15 @@
 **One brightness control for every screen: external monitors over DDC/CI and the laptop panel over WMI, from the Windows tray.**
 
 [![Release](https://img.shields.io/github/v/release/sfortis/lumos_ddc?logo=github)](https://github.com/sfortis/lumos_ddc/releases/latest)
-[![Build](https://github.com/sfortis/lumos_ddc/actions/workflows/build.yml/badge.svg?branch=dev)](https://github.com/sfortis/lumos_ddc/actions/workflows/build.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/sfortis/lumos_ddc/build.yml?branch=dev&label=build&logo=github-actions)](https://github.com/sfortis/lumos_ddc/actions/workflows/build.yml)
 [![Downloads](https://img.shields.io/github/downloads/sfortis/lumos_ddc/total?logo=github)](https://github.com/sfortis/lumos_ddc/releases)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![Language](https://img.shields.io/badge/C-native%20Windows%20API-A8B9CC?logo=c&logoColor=white)
 ![Size](https://img.shields.io/badge/size-~200%20KB-success)
+
+<br/>
+
+<a href="https://www.buymeacoffee.com/sfortis" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="58" /></a>
 
 </div>
 
@@ -262,7 +266,7 @@ AutoBrightness=1
 Curve=0:20,10:40,77:85,1000:100
 ```
 
-In Settings, a number changes with its `-` and `+` buttons or with the mouse wheel over the row, a switch flips when you click it, and nothing is written until you press Save. Cancel, `Esc` or a click outside the window closes it without saving. The schedule editor has the same buttons and closes the same way. Both windows can be moved by dragging any spot that is not a control.
+In Settings, a number changes with its `-` and `+` buttons or with the mouse wheel over its value, a switch flips when you click it, and nothing is written until you press Save. Cancel, `Esc` or a click outside the window closes it without saving. The schedule editor has the same buttons and closes the same way. Both windows can be moved by dragging any spot that is not a control. When Settings is taller than the screen, its rows scroll with the mouse wheel anywhere else in the window, or with the scroll bar on the right edge.
 
 Hotkeys are stored as text. Modifiers are `Ctrl`, `Alt`, `Shift` and `Win`, and keys are letters, digits, `F1` to `F24`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete`, `Space`, `Enter`, `Tab`, `Backspace`, `Pause` and the numeric keypad (`Num0` to `Num9`, `NumPlus`, `NumMinus`, `NumMultiply`, `NumDivide`, `NumDecimal`). `None` turns a hotkey off, and a value that cannot be read falls back to the default. A `config.ini` from version 1.1 or older has no hotkey lines, and it keeps the `Ctrl+Alt+Up` / `Ctrl+Alt+Down` brightness hotkeys those versions used.
 
