@@ -51,6 +51,7 @@ typedef struct {
     BOOL  idleDimEnabled;
     int   idleDimPercent;
     int   idleDimMinutes;
+    BOOL  restoreWindows;
     int   presetValues[MAX_PRESETS];
     int   presetCount;
     BOOL  haAutoEnabled;
@@ -155,6 +156,9 @@ static void BuildSettingsRows(SetEditData *d)
     SetAddToggle(d, L"Dim when idle", &d->idleDimEnabled);
     SetAddNumber(d, L"Idle level", &d->idleDimPercent, 0, 100, 1, SET_UNIT_PERCENT);
     SetAddNumber(d, L"Dim after", &d->idleDimMinutes, 1, 1440, 5, SET_UNIT_MINUTES);
+
+    SetAddRow(d, SET_SECTION, L"WINDOWS");
+    SetAddToggle(d, L"Restore window positions", &d->restoreWindows);
 
     SetAddRow(d, SET_SECTION, L"SCHEDULE");
     SetAddToggle(d, L"Brightness schedule", &d->scheduleEnabled);
@@ -935,6 +939,7 @@ static void SetCommit(SetEditData *d)
     s->idleDimEnabled  = d->idleDimEnabled;
     s->idleDimPercent  = d->idleDimPercent;
     s->idleDimMinutes  = d->idleDimMinutes;
+    s->restoreWindows  = d->restoreWindows;
     for (int i = 0; i < d->presetCount && i < s->presetCount; i++)
         s->presets[i].brightness = (DWORD)d->presetValues[i];
     for (int i = 0; i < HOTKEY_COUNT; i++)
@@ -1322,6 +1327,7 @@ void UI_ShowSettings(HWND hwndOwner, Settings *s)
     g_set.idleDimEnabled = s->idleDimEnabled;
     g_set.idleDimPercent = s->idleDimPercent;
     g_set.idleDimMinutes = s->idleDimMinutes;
+    g_set.restoreWindows = s->restoreWindows;
     g_set.presetCount = s->presetCount;
     for (int i = 0; i < s->presetCount; i++)
         g_set.presetValues[i] = (int)s->presets[i].brightness;

@@ -50,6 +50,7 @@ void Settings_CreateDefaults(Settings *s)
     WritePrivateProfileStringW(L"Settings", L"IdleDimEnabled", L"0", s->iniPath);
     WritePrivateProfileStringW(L"Settings", L"IdleDimPercent", L"5", s->iniPath);
     WritePrivateProfileStringW(L"Settings", L"IdleDimMinutes", L"5", s->iniPath);
+    WritePrivateProfileStringW(L"Settings", L"RestoreWindows", L"0", s->iniPath);
 
     /* Written out on a new install, so that a config.ini with no hotkey lines
        is recognizably older than 1.2 (see Settings_Load). */
@@ -215,6 +216,8 @@ void Settings_Load(Settings *s)
     if (s->idleDimMinutes < 1)    s->idleDimMinutes = 1;
     if (s->idleDimMinutes > 1440) s->idleDimMinutes = 1440;
 
+    s->restoreWindows = (BOOL)GetPrivateProfileIntW(L"Settings", L"RestoreWindows", 0, s->iniPath);
+
     /* Hotkeys are stored as text ("Ctrl+Win+Up"). A missing line means the
        file predates configurable hotkeys, because a new install writes all of
        them: such a file keeps the Ctrl+Alt combinations it has always had. An
@@ -295,6 +298,8 @@ void Settings_Save(Settings *s)
     WritePrivateProfileStringW(L"Settings", L"IdleDimPercent", val, s->iniPath);
     wsprintfW(val, L"%d", s->idleDimMinutes);
     WritePrivateProfileStringW(L"Settings", L"IdleDimMinutes", val, s->iniPath);
+    WritePrivateProfileStringW(L"Settings", L"RestoreWindows",
+                               s->restoreWindows ? L"1" : L"0", s->iniPath);
 
     for (int i = 0; i < HOTKEY_COUNT; i++) {
         char text[HOTKEY_TEXT_MAX];

@@ -40,6 +40,7 @@ typedef struct {
     BOOL          idleDimEnabled;
     int           idleDimPercent;   /* level held while the session is idle (0-100) */
     int           idleDimMinutes;   /* idle time before dimming */
+    BOOL          restoreWindows;   /* put windows back after a display dropped (winpos.c) */
     Hotkey        hotkeys[HOTKEY_COUNT];   /* indexed by HOTKEY_BRIGHTEN etc. */
     /* Home Assistant auto brightness, from [HomeAssistant]. The token is in
        clear only in memory; config.ini holds it encrypted (secret.c). An empty

@@ -87,8 +87,9 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 - **Auto brightness from a light sensor** - Optional. Lumos reads an illuminance sensor from your Home Assistant server and sets the All Monitors level from the light in the room. When you change the brightness yourself, Lumos remembers that level for that light, so the curve learns what you like. See [Auto brightness with Home Assistant](#auto-brightness-with-home-assistant).
 - **Presets** - Night, Day and Presentation, with editable brightness values.
 - **Command line** - `lumosctl.exe` sets, raises, lowers and reads the brightness of all monitors or one of them, applies presets, and switches the schedule and idle dim, through the running Lumos.
-- **Settings window** - A dark window for the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness, and the preset values.
+- **Settings window** - A dark window for the brightness step, the hotkeys, idle dim, the window restore, the schedule and autostart switches, Home Assistant auto brightness, and the preset values.
 - **Reconnect and restore** - Lumos detects the monitors again after a plug or unplug, an unlock, a display power-on and a wake from sleep, and re-applies your brightness, because displays often reset to full brightness across sleep. An external monitor often wakes a few seconds after the laptop panel and does not answer DDC/CI at first. Lumos then shows it as **Unavailable**, keeps the other screens working, and tries again after 2, 5, 10 and 20 seconds and then every minute until the monitor answers. The same retry runs when Lumos starts while a known monitor is still off.
+- **Window positions after a display drops** - Optional, off by default. A monitor on DisplayPort often drops its link while it sleeps, and Windows then moves every window to the screens that remain, or to a small placeholder screen when none remains. When the monitor returns, the windows stay where Windows put them. Lumos remembers the window arrangement when the session locks or the display turns off, and every few seconds while you work, so a monitor switched off at its button is covered too. If a display dropped in the meantime, Lumos puts the windows back a few seconds after the same displays are present again. It leaves alone any window you moved or resized after you came back, and it does not change the focus.
 - **Autostart** - Optional launch at login.
 - **Single instance with handoff** - Starting a newer build takes over from the one that is running.
 
@@ -228,7 +229,7 @@ Settings live in an INI file that is created on the first run:
 %APPDATA%\Lumos\config.ini
 ```
 
-Almost everything in it can be set from the interface. Settings covers the brightness step, the hotkeys, idle dim, the schedule and autostart switches, Home Assistant auto brightness and the preset values. The popup sets the minimum and maximum of each monitor, and the schedule points have their own editor (right-click the tray icon, then Edit Schedule). Preset names are the one thing that has to be edited in the file, because the interface has no text input.
+Almost everything in it can be set from the interface. Settings covers the brightness step, the hotkeys, idle dim, the window restore, the schedule and autostart switches, Home Assistant auto brightness and the preset values. The popup sets the minimum and maximum of each monitor, and the schedule points have their own editor (right-click the tray icon, then Edit Schedule). Preset names are the one thing that has to be edited in the file, because the interface has no text input.
 
 ```ini
 [Presets]
@@ -243,6 +244,7 @@ ScheduleEnabled=0
 IdleDimEnabled=0
 IdleDimPercent=5
 IdleDimMinutes=5
+RestoreWindows=0
 HotkeyBrighten=Ctrl+Win+Up
 HotkeyDim=Ctrl+Win+Down
 HotkeyPopup=Ctrl+Win+B

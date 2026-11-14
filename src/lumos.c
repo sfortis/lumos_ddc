@@ -5,6 +5,7 @@
 #include <wtsapi32.h>
 #include <shlobj.h>
 #include <windowsx.h>
+#include <dbt.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -18,12 +19,20 @@
 #include "remote.h"
 #include "hass.h"
 #include "ambient.h"
+#include "layout.h"
+#include "winpos.h"
 
 /* GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
    Defined manually because some MinGW headers omit it. Fires on display
    power on/off (including the transition back on after a lock screen). */
 static const GUID kGuidConsoleDisplayState =
     { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+
+/* GUID_DEVINTERFACE_MONITOR {E6F07B5F-EE97-4A90-B076-33F57BF4EAA7}. A monitor
+   that drops arrives and leaves as a device, which marks a pending window
+   snapshot as disturbed even if no WM_DISPLAYCHANGE reaches us during a lock. */
+static const GUID kGuidDevinterfaceMonitor =
+    { 0xe6f07b5f, 0xee97, 0x4a90, { 0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7 } };
 
 /* Coalesce the near-simultaneous unlock + display-power triggers into one
    re-enumeration so we don't hammer the DDC/I2C bus. */
@@ -38,6 +47,7 @@ static const GUID kGuidConsoleDisplayState =
    pile up; the notches themselves are counted in g_wheelPending. */
 #define WM_APP_WHEEL        (WM_APP + 2)
 #define WM_APP_AUTO_READING (WM_APP + 3)   /* a Home Assistant poll finished */
+#define WM_APP_WINDOW_MOVED (WM_APP + 4)   /* the user moved, sized or minimized a window (winpos.c) */
 
 /* Schedule tick: recompute the interpolated brightness once a minute. */
 #define SCHEDULE_TIMER_ID   0xB101
@@ -111,6 +121,27 @@ static const DWORD kRescanBackoffMs[] = { 2000, 5000, 10000, 20000 };
 #define AUTO_RAMP_MS          100
 #define AUTO_CONFIRM_MS       3000    /* the FP2 finishes a lamp ramp in about 2 s */
 
+/* Window restore. Windows moves windows for a few seconds after a display
+   returns, and the G9 drops and returns several times in a row, so the
+   restore waits until the displays have been quiet this long. */
+#define LAYOUT_QUIET_TIMER_ID   0xB109
+#define LAYOUT_QUIET_MS         3000
+/* A snapshot older than this after the unlock would surprise the user more
+   than it helps, so it is dropped. */
+#define LAYOUT_EXPIRY_TIMER_ID  0xB10A
+#define LAYOUT_EXPIRY_MS        600000
+/* A monitor switched off at its button raises no lock and no display-off,
+   and Windows has moved the windows by the time WM_DISPLAYCHANGE arrives. A
+   rolling snapshot taken before that is the only record. A capture costs
+   under 1 ms (18 windows, measured 2026-11-06), so a refresh every 15 s is
+   cheap, and one 1 s after the user moves a window keeps it current. */
+#define LAYOUT_ROLL_TIMER_ID    0xB10B
+#define LAYOUT_ROLL_MS          15000
+#define LAYOUT_ROLL_SOON_TIMER_ID 0xB10C
+#define LAYOUT_ROLL_SOON_MS     1000
+#define LAYOUT_VERIFY_TIMER_ID  0xB10D   /* debug build: check the windows again after a restore */
+#define LAYOUT_VERIFY_MS        5000
+
 static HINSTANCE    g_hInst;
 static HWND         g_hwndHidden;    /* Hidden top-level window (receives broadcasts + notifications) */
 static HWND         g_hwndPopup;
@@ -119,6 +150,11 @@ static Settings     g_settings;
 static NOTIFYICONDATAW g_nid;
 static HHOOK        g_mouseHook;
 static HPOWERNOTIFY g_hPowerNotify;   /* GUID_CONSOLE_DISPLAY_STATE registration */
+static HDEVNOTIFY   g_hMonitorNotify; /* GUID_DEVINTERFACE_MONITOR registration */
+static LayoutState  g_layout;         /* window restore state machine (layout.c) */
+static LayoutSnapshot g_layoutSnap;   /* windows and displays at lock or display-off */
+static LayoutSnapshot g_layoutRoll;   /* refreshed while nothing is pending, see LAYOUT_ROLL_MS */
+static BOOL         g_layoutRollValid;
 static UINT         g_wmTakeover;     /* cross-process "quit, I'm replacing you" message */
 static volatile LONG g_rescanBusy;    /* 1 while a rescan worker thread is in flight */
 static BOOL         g_rescanPending;  /* a trigger arrived mid-rescan; run once more (main thread only) */
@@ -170,6 +206,7 @@ static void InstallMouseHook(void);
 static void RemoveMouseHook(void);
 static void ScheduleRescan(HWND hwnd);
 static void ScheduleRescanFromTrigger(HWND hwnd);
+static void LayoutStart(void);
 static int  MarkKnownUnanswered(MonitorList *ml);
 static const AppControl kAppControl;   /* lumosctl actions, defined below */
 static void StartRescan(HWND hwnd);
@@ -273,6 +310,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
     WTSRegisterSessionNotification(g_hwndHidden, NOTIFY_FOR_THIS_SESSION);
     g_hPowerNotify = RegisterPowerSettingNotification(
         g_hwndHidden, &kGuidConsoleDisplayState, DEVICE_NOTIFY_WINDOW_HANDLE);
+    DEV_BROADCAST_DEVICEINTERFACE_W monFilter = { 0 };
+    monFilter.dbcc_size = sizeof(monFilter);
+    monFilter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    monFilter.dbcc_classguid = kGuidDevinterfaceMonitor;
+    g_hMonitorNotify = RegisterDeviceNotificationW(g_hwndHidden, &monFilter,
+                                                   DEVICE_NOTIFY_WINDOW_HANDLE);
+    LayoutStart();
 
     /* Create popup (hidden) */
     g_hwndPopup = UI_CreatePopup(hInst, &g_monitors);
@@ -318,6 +362,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLineA, int showCmd
     RemoveMouseHook();
     UnregisterHotkeys(g_hwndHidden);
     if (g_hPowerNotify) UnregisterPowerSettingNotification(g_hPowerNotify);
+    if (g_hMonitorNotify) UnregisterDeviceNotification(g_hMonitorNotify);
+    Winpos_StopTracking();
     WTSUnRegisterSessionNotification(g_hwndHidden);
     RemoveTrayIcon();
     Monitor_Cleanup(&g_monitors);
@@ -409,6 +455,155 @@ static void DbgLog(const char *fmt, ...)
 #else
 #define TIMED(label, ...) do { __VA_ARGS__; } while (0)
 #endif
+
+/* ---- Window restore ---- */
+
+/* WTSINFOEXW and WTSSessionInfoEx are missing from the MinGW headers. Only
+   the level 1 fields up to SessionFlags are read. The real union also holds
+   LARGE_INTEGER fields, so the align member keeps Data at the same offset. */
+typedef struct {
+    DWORD Level;
+    union {
+        struct { ULONG SessionId; int SessionState; LONG SessionFlags; } l1;
+        LARGE_INTEGER align;
+    } Data;
+} WtsInfoExPrefix;
+#define WTS_INFO_SESSION_EX  ((WTS_INFO_CLASS)25)   /* WTSSessionInfoEx */
+#define WTS_FLAGS_LOCKED     0                      /* WTS_SESSIONSTATE_LOCK (Windows 8 and later) */
+
+static BOOL IsSessionLocked(void)
+{
+    WtsInfoExPrefix *info = NULL;
+    DWORD bytes = 0;
+    BOOL locked = FALSE;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+                                    WTS_INFO_SESSION_EX, (LPWSTR *)&info, &bytes)) {
+        if (info && bytes >= sizeof(*info) && info->Level == 1)
+            locked = info->Data.l1.SessionFlags == WTS_FLAGS_LOCKED;
+        WTSFreeMemory(info);
+    }
+    return locked;
+}
+
+static void LayoutLogDisplays(const char *what, const LayoutDisplays *d)
+{
+    for (int i = 0; i < d->count; i++)
+        DbgLog("windows: %s display %d: %ls (%d,%d)-(%d,%d)", what, i, d->mon[i].id,
+               d->mon[i].rect.left, d->mon[i].rect.top,
+               d->mon[i].rect.right, d->mon[i].rect.bottom);
+    (void)what; (void)d;
+}
+
+/* Carries out what layout.c decided for one event: the adoption first, then
+   the other actions in the order of their bits. */
+static void LayoutRun(const char *event, int actions)
+{
+    DbgLog("windows: %s -> 0x%02x", event, actions);
+    (void)event;
+    if (actions & LAYOUT_DO_ADOPT) {
+        g_layoutSnap = g_layoutRoll;
+        Winpos_LogSnapshot(&g_layoutSnap, "adopted rolling snapshot");
+    }
+    if (actions & LAYOUT_DO_SNAPSHOT) {
+        TIMED("windows: capture", Winpos_Capture(&g_layoutSnap));
+        Winpos_LogSnapshot(&g_layoutSnap, "snapshot");
+        LayoutLogDisplays("snapshot", &g_layoutSnap.displays);
+    }
+    if (actions & LAYOUT_DO_TRACK)
+        Winpos_StartTracking();
+    if (actions & LAYOUT_DO_QUIET)
+        SetTimer(g_hwndHidden, LAYOUT_QUIET_TIMER_ID, LAYOUT_QUIET_MS, NULL);
+    if (actions & LAYOUT_DO_EXPIRY)
+        SetTimer(g_hwndHidden, LAYOUT_EXPIRY_TIMER_ID, LAYOUT_EXPIRY_MS, NULL);
+    if (actions & LAYOUT_DO_RESTORE) {
+        WinposReport rep;
+        TIMED("windows: restore", Winpos_Restore(&g_layoutSnap, &rep));
+        DbgLog("windows: restored %d, unchanged %d, touched %d, gone %d, hidden %d, failed %d, hung %d",
+               rep.restored, rep.unchanged, rep.touched, rep.gone, rep.hidden, rep.failed, rep.hung);
+#ifdef DEBUG
+        /* Applications can resize themselves after the restore, on the DPI
+           change of the returning monitor. Look again once they settled. */
+        SetTimer(g_hwndHidden, LAYOUT_VERIFY_TIMER_ID, LAYOUT_VERIFY_MS, NULL);
+#endif
+    }
+    if (actions & LAYOUT_DO_DISCARD) {
+        KillTimer(g_hwndHidden, LAYOUT_QUIET_TIMER_ID);
+        KillTimer(g_hwndHidden, LAYOUT_EXPIRY_TIMER_ID);
+        Winpos_StopTracking();
+        /* g_layoutSnap keeps its content: nothing reads it while disarmed
+           except the debug verify after a restore. */
+        /* The rolling snapshot is from before the lock or the drop. */
+        SetTimer(g_hwndHidden, LAYOUT_ROLL_SOON_TIMER_ID, LAYOUT_ROLL_SOON_MS, NULL);
+    }
+}
+
+static void LayoutRefresh(void)
+{
+    if (!g_settings.restoreWindows || !Layout_CanRefresh(&g_layout))
+        return;
+    LayoutDisplays now;
+    Winpos_ReadDisplays(&now);
+    if (!Layout_RollAccept(&g_layout, g_layoutRollValid,
+                           Layout_SameDisplays(&now, &g_layoutRoll.displays))) {
+        DbgLog("windows: rolling capture skipped, the displays changed");
+        return;
+    }
+    Winpos_Capture(&g_layoutRoll);
+    g_layoutRollValid = TRUE;
+    Layout_OnRolled(&g_layout);
+}
+
+/* A rolling snapshot can stand in for a lock snapshot only when it was taken
+   under other displays than the current ones. A display change that leaves
+   the displays as they were (an HDR toggle, a refresh rate) moved no window. */
+static int LayoutRollingFits(void)
+{
+    if (!g_layoutRollValid) return 0;
+    LayoutDisplays now;
+    Winpos_ReadDisplays(&now);
+    return !Layout_SameDisplays(&now, &g_layoutRoll.displays);
+}
+
+/* Starts or stops everything the window restore runs while it is on: the
+   user-change hooks and the rolling snapshot. */
+static void LayoutConfigure(void)
+{
+    if (g_settings.restoreWindows) {
+        Winpos_Watch(g_hwndHidden, WM_APP_WINDOW_MOVED);
+        SetTimer(g_hwndHidden, LAYOUT_ROLL_TIMER_ID, LAYOUT_ROLL_MS, NULL);
+        LayoutRefresh();
+        return;
+    }
+    Winpos_Unwatch();
+    KillTimer(g_hwndHidden, LAYOUT_ROLL_TIMER_ID);
+    KillTimer(g_hwndHidden, LAYOUT_ROLL_SOON_TIMER_ID);
+    g_layoutRollValid = FALSE;
+    LayoutRun("disable", Layout_OnDisable(&g_layout));
+}
+
+static void LayoutStart(void)
+{
+    Layout_Init(&g_layout);
+#ifdef DEBUG
+    Winpos_SetLog(DbgLog);
+#endif
+    /* Lumos can start while the session is locked: an update deployed from a
+       shell did so on 2026-11-06. The lock notification has already passed,
+       and without it every display-on at the lock screen started a restore.
+       The snapshot this takes is still good, because no display can have
+       dropped since the process started. */
+    BOOL lockedAtStart = IsSessionLocked();
+    DbgLog("windows: session locked at start: %d", lockedAtStart);
+    if (lockedAtStart && g_settings.restoreWindows)
+        LayoutRun("started while locked", Layout_OnLock(&g_layout));
+    LayoutConfigure();
+}
+
+/* Events reach the state machine only while the feature is on. It is turned
+   on from Settings, so the session is unlocked then and the state is right. */
+#define LAYOUT_EVENT(name, call) do {                           \
+        if (g_settings.restoreWindows) LayoutRun(name, call);   \
+    } while (0)
 
 static BOOL IsCursorOverTrayIcon(POINT ptPhysical)
 {
@@ -1499,6 +1694,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Settings_Save(&g_settings);
             if (!g_settings.idleDimEnabled)
                 Idle_Restore();           /* undo an active dim right away */
+            LayoutConfigure();
             /* Auto brightness switched on or off, or its learned curve reset. */
             if (g_settings.haAutoEnabled != g_autoWasEnabled) {
                 Auto_Configure();
@@ -1536,11 +1732,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         DbgLog("display change: %ux%u bpp=%u",
                (unsigned)LOWORD(lParam), (unsigned)HIWORD(lParam), (unsigned)wParam);
         ScheduleRescanThrottled(hwnd);
+        LAYOUT_EVENT("display change", Layout_OnDisplayChange(&g_layout, LayoutRollingFits()));
         return 0;
+
+    case WM_DEVICECHANGE:
+        /* Only the monitor interface is registered, so any interface event here
+           is a monitor arriving or leaving. */
+        if ((wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) && lParam &&
+            ((DEV_BROADCAST_HDR *)lParam)->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+            LAYOUT_EVENT(wParam == DBT_DEVICEARRIVAL ? "monitor arrived" : "monitor removed",
+                         Layout_OnDisplayChange(&g_layout, LayoutRollingFits()));
+        return TRUE;
 
     case WM_WTSSESSION_CHANGE:
         /* Session unlocked or reconnected: DDC handles may be stale */
         DbgLog("session change: %u", (unsigned)wParam);
+        if (wParam == WTS_SESSION_LOCK)
+            LAYOUT_EVENT("lock", Layout_OnLock(&g_layout));
+        else if (wParam == WTS_SESSION_UNLOCK)
+            LAYOUT_EVENT("unlock", Layout_OnUnlock(&g_layout));
         if (wParam == WTS_SESSION_UNLOCK || wParam == WTS_CONSOLE_CONNECT) {
             g_reapplyOnRescan = TRUE;   /* restore brightness after the recovery rescan */
             ScheduleRescanFromTrigger(hwnd);
@@ -1555,6 +1765,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 IsEqualGUID(&pbs->PowerSetting, &kGuidConsoleDisplayState) &&
                 pbs->DataLength >= 1) {
                 DbgLog("display power state = %u", (unsigned)pbs->Data[0]);
+                if (pbs->Data[0] == 0)
+                    LAYOUT_EVENT("display off", Layout_OnDisplayOff(&g_layout));
+                else
+                    LAYOUT_EVENT("display on", Layout_OnDisplayOn(&g_layout));
                 if (pbs->Data[0] != 0) {   /* 0 = off, non-zero = on/dimmed */
                     g_reapplyOnRescan = TRUE;
                     ScheduleRescanFromTrigger(hwnd);
@@ -1604,6 +1818,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     DbgLog("rescan: %d workers hung in a row, waiting for a new trigger",
                            g_rescanWriteOffs);
             }
+        } else if (wParam == LAYOUT_QUIET_TIMER_ID) {
+            KillTimer(hwnd, LAYOUT_QUIET_TIMER_ID);
+            LayoutDisplays now;
+            Winpos_ReadDisplays(&now);
+            int same = Layout_SameDisplays(&now, &g_layoutSnap.displays);
+            if (!same) LayoutLogDisplays("now", &now);
+            LAYOUT_EVENT(same ? "quiet, same displays" : "quiet, other displays",
+                         Layout_OnQuiet(&g_layout, same));
+        } else if (wParam == LAYOUT_VERIFY_TIMER_ID) {
+            KillTimer(hwnd, LAYOUT_VERIFY_TIMER_ID);
+            Winpos_Verify(&g_layoutSnap);
+        } else if (wParam == LAYOUT_ROLL_TIMER_ID) {
+            LayoutRefresh();
+        } else if (wParam == LAYOUT_ROLL_SOON_TIMER_ID) {
+            KillTimer(hwnd, LAYOUT_ROLL_SOON_TIMER_ID);
+            LayoutRefresh();
+        } else if (wParam == LAYOUT_EXPIRY_TIMER_ID) {
+            KillTimer(hwnd, LAYOUT_EXPIRY_TIMER_ID);
+            LAYOUT_EVENT("expiry", Layout_OnExpiry(&g_layout));
         } else if (wParam == RESCAN_RETRY_TIMER_ID) {
             KillTimer(hwnd, RESCAN_RETRY_TIMER_ID);
             if (g_hwndPopup && IsWindowVisible(g_hwndPopup))
@@ -1611,6 +1844,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             else
                 StartRescan(hwnd);
         }
+        return 0;
+
+    case WM_APP_WINDOW_MOVED:
+        SetTimer(hwnd, LAYOUT_ROLL_SOON_TIMER_ID, LAYOUT_ROLL_SOON_MS, NULL);
         return 0;
 
     case WM_APP_AUTO_READING:

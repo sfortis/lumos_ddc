@@ -28,6 +28,7 @@ cl /nologo /O2 /W4 /WX- %DEFS% /I src ^
    src\ui_osd.c src\ui_menu.c src\ui_sched.c src\ui_settings.c src\ui_about.c src\ui_hass.c ^
    src\presets.c src\schedule.c src\hotkey.c src\a11y.c src\remote.c src\wmibright.c ^
    src\capture.c src\hass.c src\hassurl.c src\json.c src\ambient.c src\secret.c ^
+   src\layout.c src\winpos.c ^
    build\lumos.res ^
    /Fo"build\\" /Fe:build\lumos.exe ^
    /link /subsystem:windows ^
