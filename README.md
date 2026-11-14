@@ -76,7 +76,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 ## Features
 
 - **Dual backend** - External monitors are driven over DDC/CI (dxva2) and internal laptop panels over WMI, in the same interface.
-- **Tray popup** - A dark popup with a slider for each monitor and an "All Monitors" slider that moves them together.
+- **Tray popup** - A dark popup with a slider for each monitor and an "All Monitors" slider that moves them together. With a single monitor, the popup shows only that monitor's slider.
 - **Per-monitor range** - Each monitor has a minimum and a maximum: its level when All Monitors is at 0% and at 100%. All Monitors moves every monitor linearly across its own range, so two monitors matched at both ends stay matched in between, and every step moves every monitor. Both are set with the `-` / `+` under the monitor in the popup: Min on the left, Max on the right. Offsets from older versions are converted automatically.
 - **Global hotkeys** - `Ctrl+Win+Up` / `Ctrl+Win+Down` change the brightness of all screens, and `Ctrl+Win+B` opens the popup. All three can be changed in Settings. An installation upgraded from 1.1 or older keeps the `Ctrl+Alt+Up` / `Ctrl+Alt+Down` it had.
 - **Mouse wheel on the tray icon** - Scrolling over the tray icon moves the brightness up or down by one step.

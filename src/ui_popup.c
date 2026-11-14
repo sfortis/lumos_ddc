@@ -136,6 +136,15 @@ static int HitTestDelta(PopupData *pd, int x, int y, int *outRow, int *outEnd)
 
 /* ---- Popup layout ---- */
 
+/* The "All Monitors" row follows the monitor rows. With exactly one monitor it
+   would move the same display as that monitor's own slider, so it is left out.
+   A monitor shown as Unavailable still counts, so the layout does not change
+   while it waits to answer after a wake. With no monitor at all the row stays,
+   so the popup always has a control to focus. */
+static BOOL HasMasterRow(PopupData *pd) { return pd->ml->count != 1; }
+static int  RowCount(PopupData *pd)     { return pd->ml->count + (HasMasterRow(pd) ? 1 : 0); }
+static BOOL IsMasterRow(PopupData *pd, int row) { return HasMasterRow(pd) && row == pd->ml->count; }
+
 /* ---- Auto brightness panel ---- */
 
 static AutoInfo g_autoInfo;
@@ -152,13 +161,12 @@ static int AutoPanelHeight(void)
 
 static int GetPopupHeight(PopupData *pd)
 {
-    int rows = pd->ml->count + 1;
-    return POPUP_PADDING + 24 + (rows * POPUP_ROW_H) + AutoPanelHeight() + POPUP_PADDING;
+    return POPUP_PADDING + 24 + (RowCount(pd) * POPUP_ROW_H) + AutoPanelHeight() + POPUP_PADDING;
 }
 
 static int AutoPanelTop(PopupData *pd)
 {
-    return POPUP_PADDING + 24 + (pd->ml->count + 1) * POPUP_ROW_H;
+    return POPUP_PADDING + 24 + RowCount(pd) * POPUP_ROW_H;
 }
 
 /* The status line in two parts: what (left) and the numbers (right). */
@@ -360,12 +368,12 @@ static int XFromPercent(RECT *sliderRect, int pct)
 
 /* ---- Keyboard items ----
    Focus order follows the layout: each monitor's slider, then its minimum,
-   then its maximum, then "All Monitors". Item i belongs to row i / 3, which
-   also gives the master row (ml->count) for the last item. */
+   then its maximum, then "All Monitors" when that row is shown. Item i belongs
+   to row i / 3, which also gives the master row (ml->count) for the last item. */
 
 #define ITEMS_PER_ROW 3
 
-static int ItemCount(PopupData *pd)  { return pd->ml->count * ITEMS_PER_ROW + 1; }
+static int ItemCount(PopupData *pd)  { return pd->ml->count * ITEMS_PER_ROW + (HasMasterRow(pd) ? 1 : 0); }
 static int MasterItem(PopupData *pd) { return pd->ml->count * ITEMS_PER_ROW; }
 static int ItemRow(int item)         { return item / ITEMS_PER_ROW; }
 static int SliderItem(int row)       { return row * ITEMS_PER_ROW; }
@@ -374,6 +382,13 @@ static int RangeItem(int row, int end) { return row * ITEMS_PER_ROW + 1 + end; }
 static BOOL ItemIsRange(PopupData *pd, int item)
 {
     return item < MasterItem(pd) && (item % ITEMS_PER_ROW) != 0;
+}
+
+/* The item that has the focus when the popup opens: "All Monitors", the
+   control most people want, or the only monitor's slider when it is hidden. */
+static int DefaultItem(PopupData *pd)
+{
+    return HasMasterRow(pd) ? MasterItem(pd) : SliderItem(0);
 }
 
 /* RANGE_MIN or RANGE_MAX for a range item. */
@@ -387,7 +402,7 @@ static int RowPercent(PopupData *pd, int row)
 {
     if (pd->activeSlider == row && pd->dragPercent >= 0)
         return pd->dragPercent;
-    if (row == pd->ml->count)
+    if (IsMasterRow(pd, row))
         return pd->masterPercent;
     return GetMonPercent(&pd->ml->monitors[row]);
 }
@@ -431,7 +446,7 @@ static void PopupA11yDescribe(void *ctx, int index, A11yItem *out)
         return;
     }
     int row = ItemRow(index);
-    BOOL isMaster = (index == MasterItem(pd));
+    BOOL isMaster = IsMasterRow(pd, row);
     BrightMonitor *mon = isMaster ? NULL : &pd->ml->monitors[row];
     GetItemFocusRect(pd, index, &out->rect);
     out->state = STATE_SYSTEM_FOCUSABLE;
@@ -500,14 +515,14 @@ static void RenderPopup(HWND hwnd, PopupData *pd)
     DrawTextW(dc, L"Brightness", -1, &rcTitle, DT_LEFT | DT_SINGLELINE);
 
     MonitorList *ml = pd->ml;
-    int totalRows = ml->count + 1;
+    int totalRows = RowCount(pd);
     HBRUSH trackBrush = CreateSolidBrush(HexToColorRef(CLR_TRACK));
     HBRUSH fillBrush = CreateSolidBrush(HexToColorRef(CLR_ACCENT));
     HPEN noPen = CreatePen(PS_NULL, 0, 0);
     HPEN oldPen = (HPEN)SelectObject(dc, noPen);
 
     for (int row = 0; row < totalRows; row++) {
-        BOOL isMaster = (row == ml->count);
+        BOOL isMaster = IsMasterRow(pd, row);
         /* A monitor that does not answer shows no level and no thumb: the last
            value read from it may be long out of date. */
         BOOL unavailable = !isMaster && !ml->monitors[row].controllable;
@@ -629,7 +644,7 @@ static void RenderPopup(HWND hwnd, PopupData *pd)
 
 static int HitTestSlider(PopupData *pd, int x, int y)
 {
-    int totalRows = pd->ml->count + 1;
+    int totalRows = RowCount(pd);
     for (int row = 0; row < totalRows; row++) {
         if (row < pd->ml->count && !pd->ml->monitors[row].controllable)
             continue;   /* no slider to drag on a monitor that does not answer */
@@ -646,7 +661,7 @@ static int HitTestSlider(PopupData *pd, int x, int y)
 static void ApplySliderValue(PopupData *pd, int row, int percent)
 {
     MonitorList *ml = pd->ml;
-    BOOL isMaster = (row == ml->count);
+    BOOL isMaster = IsMasterRow(pd, row);
 
     if (isMaster) {
         pd->masterPercent = percent;
@@ -939,7 +954,7 @@ HWND UI_CreatePopup(HINSTANCE hInst, MonitorList *ml)
     g_popupData.activeSlider = -1;
     g_popupData.dragPercent = -1;
     g_popupData.masterPercent = GetMasterPercent(ml);
-    g_popupData.focusItem = MasterItem(&g_popupData);
+    g_popupData.focusItem = DefaultItem(&g_popupData);
 
     int h = GetPopupHeight(&g_popupData);
 
@@ -960,8 +975,7 @@ void UI_ShowPopup(HWND hwnd, MonitorList *ml, const POINT *anchor, BOOL fromKeyb
     Monitor_RefreshBrightness(ml);
     g_popupData.ml = ml;
     g_popupData.masterPercent = GetMasterPercent(ml);
-    /* Every opening starts on "All Monitors", the control most people want. */
-    g_popupData.focusItem = MasterItem(&g_popupData);
+    g_popupData.focusItem = DefaultItem(&g_popupData);
     g_popupData.focusVisible = fromKeyboard;
 
     int h = GetPopupHeight(&g_popupData);
