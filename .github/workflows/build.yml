@@ -1,7 +1,8 @@
 # Builds Lumos with MinGW and runs the unit tests on every push and pull
 # request to dev and main. A pushed tag vX.Y.Z also creates a draft release
-# with lumos-vX.Y.Z.exe and lumosctl.exe attached; the notes are written and
-# the release is published by hand.
+# with lumos.exe and lumosctl.exe attached (a prerelease tag such as
+# vX.Y.Z-beta.N attaches lumos-vX.Y.Z-beta.N.exe instead); the notes are
+# written and the release is published by hand.
 name: Build
 
 on:
@@ -61,17 +62,24 @@ jobs:
           name: lumos
           path: dist
 
-      # Only the app carries the version in its file name; lumosctl.exe keeps
-      # its plain name so it can be used without renaming.
+      # A stable release ships lumos.exe under its plain name. A prerelease
+      # puts its version in the app's file name, so a beta is not mistaken for
+      # a stable build. lumosctl.exe always keeps its plain name.
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mv dist/lumos.exe "dist/lumos-$GITHUB_REF_NAME.exe"
+          pre=""
+          app="dist/lumos.exe"
+          case "$GITHUB_REF_NAME" in
+            *-*)
+              pre="--prerelease"
+              app="dist/lumos-$GITHUB_REF_NAME.exe"
+              mv dist/lumos.exe "$app"
+              ;;
+          esac
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            pre=""
-            case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
             gh release create "$GITHUB_REF_NAME" --draft $pre --verify-tag \
               --title "Lumos $GITHUB_REF_NAME" --notes "Release notes to be written."
           fi
-          gh release upload "$GITHUB_REF_NAME" "dist/lumos-$GITHUB_REF_NAME.exe" dist/lumosctl.exe --clobber
+          gh release upload "$GITHUB_REF_NAME" "$app" dist/lumosctl.exe --clobber

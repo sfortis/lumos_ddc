@@ -105,7 +105,7 @@ During detection, Lumos first tries to read each monitor's brightness over DDC/C
 
 ## Install
 
-1. Download `lumos-vX.Y.Z.exe` from the [Releases](https://github.com/sfortis/lumos_ddc/releases/latest) page, and `lumosctl.exe` too if you want the command line tool.
+1. Download `lumos.exe` from the [Releases](https://github.com/sfortis/lumos_ddc/releases/latest) page, and `lumosctl.exe` too if you want the command line tool.
 2. Run it. Lumos lives in the system tray as a small sun icon; there is nothing to install.
 3. Optional: right-click the tray icon and enable **Start with Windows**.
 
