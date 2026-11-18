@@ -2,7 +2,9 @@
 # request to dev and main. A pushed tag vX.Y.Z also creates a draft release
 # with lumos.exe and lumosctl.exe attached (a prerelease tag such as
 # vX.Y.Z-beta.N attaches lumos-vX.Y.Z-beta.N.exe instead); the notes are
-# written and the release is published by hand.
+# written and the release is published by hand. A stable release also gets
+# lumos.zip with both exes, which is the installer of the winget package
+# (see winget.yml).
 name: Build
 
 on:
@@ -62,24 +64,30 @@ jobs:
           name: lumos
           path: dist
 
-      # A stable release ships lumos.exe under its plain name. A prerelease
-      # puts its version in the app's file name, so a beta is not mistaken for
-      # a stable build. lumosctl.exe always keeps its plain name.
+      # A stable release ships lumos.exe under its plain name, plus lumos.zip
+      # with both exes at its root for winget. A prerelease puts its version
+      # in the app's file name, so a beta is not mistaken for a stable build,
+      # and has no zip. lumosctl.exe always keeps its plain name.
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           pre=""
           app="dist/lumos.exe"
+          zip=""
           case "$GITHUB_REF_NAME" in
             *-*)
               pre="--prerelease"
               app="dist/lumos-$GITHUB_REF_NAME.exe"
               mv dist/lumos.exe "$app"
               ;;
+            *)
+              zip="dist/lumos.zip"
+              (cd dist && zip -X lumos.zip lumos.exe lumosctl.exe)
+              ;;
           esac
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --draft $pre --verify-tag \
               --title "Lumos $GITHUB_REF_NAME" --notes "Release notes to be written."
           fi
-          gh release upload "$GITHUB_REF_NAME" "$app" dist/lumosctl.exe --clobber
+          gh release upload "$GITHUB_REF_NAME" "$app" dist/lumosctl.exe $zip --clobber
