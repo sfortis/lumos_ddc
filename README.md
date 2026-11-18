@@ -63,12 +63,12 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup: a slider, a minimum and a maximum for each monitor, the All Monitors slider, and the auto brightness panel with the light sensor reading and the learned curve" />
+  <img src="screenshots/01-popup.png" width="320" alt="Brightness popup with one monitor: its slider, minimum and maximum, and the auto brightness panel with the light sensor reading and the learned curve" />
   &nbsp;&nbsp;
   <img src="screenshots/02-context-menu.png" width="220" alt="Dark context menu in three groups: presets; auto brightness, schedule and idle dim; re-scan, Settings and autostart; then About and Exit" />
 </p>
 <p align="center">
-  <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, schedule, Home Assistant and presets" />
+  <img src="screenshots/04-settings.png" width="280" alt="Settings window with sections for general settings, hotkeys, idle dim, window restore, schedule, Home Assistant and presets" />
   &nbsp;&nbsp;
   <img src="screenshots/03-osd.png" width="200" alt="On-screen display overlay with percentage and progress bar" />
 </p>
@@ -89,7 +89,7 @@ Windows can dim a laptop panel, but it will not touch the brightness of external
 - **Command line** - `lumosctl.exe` sets, raises, lowers and reads the brightness of all monitors or one of them, applies presets, and switches the schedule and idle dim, through the running Lumos.
 - **Settings window** - A dark window for the brightness step, the hotkeys, idle dim, the window restore, the schedule and autostart switches, Home Assistant auto brightness, and the preset values.
 - **Reconnect and restore** - Lumos detects the monitors again after a plug or unplug, an unlock, a display power-on and a wake from sleep, and re-applies your brightness, because displays often reset to full brightness across sleep. An external monitor often wakes a few seconds after the laptop panel and does not answer DDC/CI at first. Lumos then shows it as **Unavailable**, keeps the other screens working, and tries again after 2, 5, 10 and 20 seconds and then every minute until the monitor answers. The same retry runs when Lumos starts while a known monitor is still off.
-- **Window positions after a display drops** - Optional, off by default. A monitor on DisplayPort often drops its link while it sleeps, and Windows then moves every window to the screens that remain, or to a small placeholder screen when none remains. When the monitor returns, the windows stay where Windows put them. Lumos remembers the window arrangement when the session locks or the display turns off, and every few seconds while you work, so a monitor switched off at its button is covered too. If a display dropped in the meantime, Lumos puts the windows back a few seconds after the same displays are present again. It leaves alone any window you moved or resized after you came back, and it does not change the focus.
+- **Window positions after a display drops** - Optional, off by default. Some monitors drop their link while they sleep, and Windows then moves every window to the screens that remain, or to a small placeholder screen when none remains. When the monitor returns, the windows stay where Windows put them. Lumos remembers the window arrangement when the session locks or the display turns off, and every few seconds while you work, so a monitor switched off at its button is covered too. If a display dropped in the meantime, Lumos puts the windows back a few seconds after the same displays are present again. It leaves alone any window you moved or resized after you came back, and it does not change the focus.
 - **Autostart** - Optional launch at login.
 - **Single instance with handoff** - Starting a newer build takes over from the one that is running.
 
