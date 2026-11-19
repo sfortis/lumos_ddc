@@ -2,7 +2,8 @@
 # (microsoft/winget-pkgs) as a new version of the sfortis.Lumos package.
 # It runs when a release is published, never for a prerelease, and opens a
 # pull request from the sfortis fork of winget-pkgs. The installer is
-# lumos.zip, which build.yml attaches to every stable release.
+# lumos-setup.exe (Inno Setup), which build.yml attaches to every stable
+# release. Version 1.4.0 was submitted as the portable lumos.zip.
 #
 # WINGET_TOKEN is a classic PAT of sfortis with the public_repo and workflow
 # scopes. The action is pinned to a commit because it receives that token.
@@ -27,6 +28,6 @@ jobs:
       - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         with:
           identifier: sfortis.Lumos
-          installers-regex: '^lumos\.zip$'
+          installers-regex: '^lumos-setup\.exe$'
           release-tag: ${{ inputs.tag || github.event.release.tag_name }}
           token: ${{ secrets.WINGET_TOKEN }}

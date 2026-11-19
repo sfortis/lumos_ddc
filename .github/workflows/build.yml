@@ -3,8 +3,9 @@
 # with lumos.exe and lumosctl.exe attached (a prerelease tag such as
 # vX.Y.Z-beta.N attaches lumos-vX.Y.Z-beta.N.exe instead); the notes are
 # written and the release is published by hand. A stable release also gets
-# lumos.zip with both exes, which is the installer of the winget package
-# (see winget.yml).
+# lumos.zip with both exes and the installer lumos-setup.exe, which is built
+# from installer/lumos.iss with Inno Setup on a Windows runner and is the
+# installer of the winget package (see winget.yml).
 name: Build
 
 on:
@@ -41,9 +42,39 @@ jobs:
             build/lumosctl.exe
           if-no-files-found: error
 
+  installer:
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lumos
+          path: dist
+
+      # When the runner image has no Inno Setup 6, it is installed from Chocolatey.
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path src/resource.h -Pattern '^#define APP_VERSION\s+L"(.*)"').Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          & $iscc "/DAppVersion=$version" "/DBuildDir=$PWD\dist" installer\lumos.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lumos-setup
+          path: dist/lumos-setup.exe
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -64,10 +95,16 @@ jobs:
           name: lumos
           path: dist
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: lumos-setup
+          path: dist
+
       # A stable release ships lumos.exe under its plain name, plus lumos.zip
-      # with both exes at its root for winget. A prerelease puts its version
-      # in the app's file name, so a beta is not mistaken for a stable build,
-      # and has no zip. lumosctl.exe always keeps its plain name.
+      # with both exes at its root and the installer lumos-setup.exe. A
+      # prerelease puts its version in the app's file name, so a beta is not
+      # mistaken for a stable build, and has neither the zip nor the installer.
+      # lumosctl.exe always keeps its plain name.
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,7 +119,7 @@ jobs:
               mv dist/lumos.exe "$app"
               ;;
             *)
-              zip="dist/lumos.zip"
+              zip="dist/lumos.zip dist/lumos-setup.exe"
               (cd dist && zip -X lumos.zip lumos.exe lumosctl.exe)
               ;;
           esac
