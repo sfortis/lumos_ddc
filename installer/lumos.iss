@@ -110,9 +110,15 @@ begin
     Path := '';
   if PathPos(Path, Dir) > 0 then
     Exit;
-  if (Path <> '') and (Path[Length(Path)] <> ';') then
-    Path := Path + ';';
-  RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Path + Dir);
+  { Keep a trailing semicolon where there was one, so RemoveFromPath gives
+    back exactly the PATH it found. }
+  if Path = '' then
+    Path := Dir
+  else if Path[Length(Path)] = ';' then
+    Path := Path + Dir + ';'
+  else
+    Path := Path + ';' + Dir;
+  RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Path);
 end;
 
 procedure RemoveFromPath(Dir: String);
